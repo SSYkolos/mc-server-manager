@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Google Drive OAuth Callback</title>
+  </head>
+  <body>
+    <script>
+      // Grab the code and state from URL
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      const state = params.get("state");
+
+      if (!code) {
+        document.body.innerText = "No code received from Google OAuth.";
+      } else {
+        document.body.innerText = "Code received, sending to app...";
+
+        // Send code back to main Electron window or opener
+        if (window.opener) {
+          window.opener.postMessage({ type: "oauth-code", code, state }, "*");
+        }
+      }
+
+      // Optional: close the popup automatically
+      setTimeout(() => window.close(), 1500);
+    </script>
+  </body>
+</html>

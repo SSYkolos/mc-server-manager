@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+build/
+out/
+release/
+
+# Electron / installers
+*.exe
+*.blockmap
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+firebase-debug.log*
+
+# Env
+.env
+
+# Firebase
+.firebase/
+serviceAccountKey.json
+firebase-admin-key.json
+
+# Coverage
+coverage
+.nyc_output
+
+# Cache
+.npm
+.eslintcache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

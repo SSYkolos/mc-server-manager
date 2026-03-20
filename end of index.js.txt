@@ -1,0 +1,18 @@
+end of index.js
+
+// --- Add explicit server listener here ---
+if (require.main === module) {
+  // This makes the function start a server on the PORT (Cloud Run requirement)
+  const express = require("express");
+  const app = express();
+
+  app.use(express.json());
+  app.all("/handleDriveOAuth", handleDriveOAuth);
+
+  const PORT = process.env.PORT || 8080;
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+}
+server listener
+2025/09/26
