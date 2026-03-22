@@ -1,12 +1,21 @@
 import axios from "axios"
 
-export type FileStateEntry = {
-  path: string
-  size: number
-  mtimeMs: number
-  hash: string
-  storage: "large-object" | "small-pack"
-}
+export type FileStateEntry =
+  | {
+      path: string
+      size: number
+      mtimeMs: number
+      hash: string
+      storage: "large-object"
+    }
+  | {
+      path: string
+      size: number
+      mtimeMs: number
+      hash: string
+      storage: "small-pack"
+      packHash: string
+    }
 
 export async function loadFileState({
   accessToken,

@@ -8,7 +8,6 @@ import { uploadLargeObjects } from "./uploadLargeObjects"
 import { runUploadQueue } from "./uploadQueue"
 import { getWorkerCount } from "./getWorkerCount"
 import { createSnapshotManifest } from "./createSnapshotManifest"
-import { applyRetention } from "./applyRetention"
 import { loadObjectIndex } from "./loadObjectIndex"
 import { saveObjectIndex } from "./saveObjectIndex"
 import { ensureBackupStructure } from "./ensureBackupStructure"
@@ -16,19 +15,23 @@ import { uploadSmallPacks } from "./uploadSmallPacks"
 import { uploadSnapshotManifest } from "./uploadSnapshotManifest"
 import { loadPackIndex } from "./loadPackIndex"
 import { savePackIndex } from "./savePackIndex"
+import { loadHashCache } from "./loadHashCache"
+import { saveHashCache } from "./saveHashCache"
 import { loadFileState } from "./loadFileState"
 import { saveFileState } from "./saveFileState"
 
 async function safeRemove(p: string) {
   try {
     await fs.promises.rm(p, { recursive: true, force: true })
-  } catch {
-    // ignore cleanup errors
-  }
+  } catch { }
 }
 
-function isWorldObjectPath(relPath: string) {
-  const p = relPath.replace(/\\/g, "/")
+function normalizeBackupPath(relPath: string) {
+  return relPath.replace(/\\/g, "/")
+}
+
+function isWorldRootPath(relPath: string) {
+  const p = normalizeBackupPath(relPath)
   return (
     p === "world" ||
     p.startsWith("world/") ||
@@ -36,6 +39,62 @@ function isWorldObjectPath(relPath: string) {
     p.startsWith("world_nether/") ||
     p === "world_the_end" ||
     p.startsWith("world_the_end/")
+  )
+}
+
+function canReuseSmallPackFile(args: {
+  file: {
+    path: string
+    size: number
+    hash: string
+  }
+  previousFileState: Record<string, any>
+  packIndex: Record<
+    string,
+    {
+      fileId: string
+      name: string
+      size: number
+      entriesByPath?: Record<string, { size: number; hash: string }>
+    }
+  >
+}) {
+  const prev = args.previousFileState?.[args.file.path]
+
+  if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
+    return false
+  }
+
+  const packMeta = args.packIndex?.[prev.packHash]
+  if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
+    return false
+  }
+
+  const entry = packMeta.entriesByPath[args.file.path]
+  if (!entry) {
+    return false
+  }
+
+  if (entry.size !== args.file.size) {
+    return false
+  }
+
+  if (entry.hash !== args.file.hash) {
+    return false
+  }
+
+  return true
+}
+
+function isWorldChunkLikePath(relPath: string) {
+  const p = normalizeBackupPath(relPath)
+
+  if (!isWorldRootPath(p)) return false
+
+  return (
+    p.includes("/region/") ||
+    p.includes("/entities/") ||
+    p.includes("/poi/")
   )
 }
 
@@ -53,7 +112,7 @@ export async function backupServerV2({
   retention: number
 }) {
   console.log("BACKUP V2 START")
-
+  console.log("BACKUP V2 NEW OPTIMIZED BUILD ACTIVE")
   const structure = await ensureBackupStructure({
     accessToken,
     serverRootFolderId: driveBackupFolderId
@@ -68,30 +127,71 @@ export async function backupServerV2({
     accessToken,
     fileId: structure.packIndexFileId
   })
-
   const previousFileState = await loadFileState({
     accessToken,
     fileId: structure.fileStateFileId
   })
 
-  const files = await scanBackupFiles(serverPath, previousFileState)
+  const hashCachePath = path.join(serverPath, ".backup-hash-cache.json")
+  const previousHashCache = await loadHashCache(hashCachePath)
 
-  const reusedHashes = files.filter((f) => f.hashReused).length
-  const rehashedFiles = files.length - reusedHashes
+  let nextHashCache: Record<string, any> = {}
+
+  const {
+    files,
+    nextHashCache: computedNextHashCache,
+    stats
+  } = await scanBackupFiles(serverPath, previousHashCache)
+
+  nextHashCache = computedNextHashCache
 
   console.log("FILES FOUND:", files.length)
-  console.log("HASH REUSED:", reusedHashes)
-  console.log("HASH RECOMPUTED:", rehashedFiles)
+  console.log("HASH REUSED EXACT:", stats.exactReuseCount)
+  console.log("HASH REUSED FAST:", stats.fastReuseCount)
+  console.log("HASH STRONG REHASHED:", stats.strongRehashCount)
+  console.log(
+    "HASH TOTAL REUSED:",
+    stats.exactReuseCount + stats.fastReuseCount
+  )
   console.log("OBJECT INDEX SIZE:", Object.keys(objectIndex).length)
   console.log("PACK INDEX SIZE:", Object.keys(packIndex).length)
+  console.log("RETENTION TARGET:", retention)
 
-  const worldObjectFiles = files.filter((f) => isWorldObjectPath(f.path))
-  const nonWorldFiles = files.filter((f) => !isWorldObjectPath(f.path))
+  const worldChunkFiles = files.filter((f: any) => isWorldChunkLikePath(f.path))
+  const nonChunkFiles = files.filter((f: any) => !isWorldChunkLikePath(f.path))
 
-  const metadataPackFiles = nonWorldFiles.filter((f) => f.size < 64 * 1024 * 1024)
-  const otherLargeFiles = nonWorldFiles.filter((f) => f.size >= 64 * 1024 * 1024)
+  const metadataPackFiles = nonChunkFiles.filter(
+    (f: any) => f.size < 64 * 1024 * 1024
+  )
 
-  const largeObjectInputs = [...worldObjectFiles, ...otherLargeFiles]
+  const otherLargeFiles = nonChunkFiles.filter(
+    (f: any) => f.size >= 64 * 1024 * 1024
+  )
+
+  const largeObjectInputs = [...worldChunkFiles, ...otherLargeFiles]
+
+  const unchangedSmallFiles = metadataPackFiles.filter((file: any) => {
+    const prev = previousFileState?.[file.path]
+
+    if (
+      !prev ||
+      prev.storage !== "small-pack" ||
+      prev.hash !== file.hash ||
+      prev.size !== file.size
+    ) {
+      return false
+    }
+
+    return canReuseSmallPackFile({
+      file,
+      previousFileState,
+      packIndex
+    })
+  })
+
+  const changedSmallFiles = metadataPackFiles.filter(
+    (file: any) => !unchangedSmallFiles.some((f: any) => f.path === file.path)
+  )
 
   const tempDir = path.join(serverPath, ".backup-temp")
   if (!fs.existsSync(tempDir)) {
@@ -99,7 +199,7 @@ export async function backupServerV2({
   }
 
   try {
-    const smallPacks = await buildSmallPacks(metadataPackFiles, tempDir)
+    const smallPacks = await buildSmallPacks(changedSmallFiles, tempDir)
 
     const uploadedSmallPacks = await uploadSmallPacks({
       packs: smallPacks,
@@ -131,38 +231,57 @@ export async function backupServerV2({
       data: packIndex
     })
 
-    const nextFileState: Record<string, any> = {}
-    for (const file of files) {
-      nextFileState[file.path] = {
-        path: file.path,
-        size: file.size,
-        mtimeMs: file.mtimeMs,
-        hash: file.hash,
-        storage: isWorldObjectPath(file.path) || file.size >= 64 * 1024 * 1024
-          ? "large-object"
-          : "small-pack"
-      }
-    }
-
-    await saveFileState({
-      accessToken,
-      fileId: structure.fileStateFileId,
-      data: nextFileState
-    })
-
-    const now = new Date()
-    const snapshotId =
-      `${now.getFullYear()}-` +
-      `${String(now.getMonth() + 1).padStart(2, "0")}-` +
-      `${String(now.getDate()).padStart(2, "0")}T` +
-      `${String(now.getHours()).padStart(2, "0")}-` +
-      `${String(now.getMinutes()).padStart(2, "0")}-` +
-      `${String(now.getSeconds()).padStart(2, "0")}`
+    const snapshotId = (() => {
+      const now = new Date()
+      return (
+        `${now.getFullYear()}-` +
+        `${String(now.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(now.getDate()).padStart(2, "0")}T` +
+        `${String(now.getHours()).padStart(2, "0")}-` +
+        `${String(now.getMinutes()).padStart(2, "0")}-` +
+        `${String(now.getSeconds()).padStart(2, "0")}`
+      )
+    })()
 
     const snapshotDir = path.join(tempDir, snapshotId)
     fs.mkdirSync(snapshotDir, { recursive: true })
 
-    const pathToPack: Record<string, { fileId: string; fileName: string; packHash: string }> = {}
+    const pathToPack: Record<
+      string,
+      { fileId: string; fileName: string; packHash: string }
+    > = {}
+
+    // 1) Reuse unchanged small files from previous file-state + current pack index
+for (const file of unchangedSmallFiles) {
+  const prev = previousFileState?.[file.path]
+
+  if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
+    throw new Error(`Missing reusable pack metadata for ${file.path}`)
+  }
+
+  const packMeta = packIndex[prev.packHash]
+
+  if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
+    throw new Error(`Missing packIndex entry for ${file.path}`)
+  }
+
+  const entry = packMeta.entriesByPath[file.path]
+  if (!entry) {
+    throw new Error(`Pack membership missing for ${file.path}`)
+  }
+
+  if (entry.size !== file.size || entry.hash !== file.hash) {
+    throw new Error(`Pack membership mismatch for ${file.path}`)
+  }
+
+  pathToPack[file.path] = {
+    fileId: packMeta.fileId,
+    fileName: packMeta.name,
+    packHash: prev.packHash
+  }
+}
+
+    // 2) Add newly uploaded/reused changed packs
     for (const pack of uploadedSmallPacks) {
       for (const entry of pack.entries) {
         pathToPack[entry.path] = {
@@ -173,8 +292,10 @@ export async function backupServerV2({
       }
     }
 
-    const largeEntries = largeObjects.map((obj) => {
-      const relPath = files.find((f) => f.absolute === obj.path)?.path || ""
+    const largeEntries = largeObjects.map((obj: any) => {
+      const relPath =
+        files.find((f: any) => f.absolute === obj.path)?.path || ""
+
       const objectMeta = objectIndex[obj.hash]
 
       if (!objectMeta?.fileId) {
@@ -191,8 +312,10 @@ export async function backupServerV2({
       }
     })
 
-    const smallEntries = metadataPackFiles.map((file) => {
+    // ✅ FIX: add hash to small entries
+    const smallEntries = metadataPackFiles.map((file: any) => {
       const packMeta = pathToPack[file.path]
+
       if (!packMeta?.fileId) {
         throw new Error(`Missing pack entry for ${file.path}`)
       }
@@ -200,6 +323,7 @@ export async function backupServerV2({
       return {
         path: file.path,
         size: file.size,
+        hash: file.hash,
         storage: "small-pack" as const,
         packHash: packMeta.packHash,
         packFileId: packMeta.fileId,
@@ -222,9 +346,54 @@ export async function backupServerV2({
       snapshotId,
       manifestPath
     })
+    const nextFileState: Record<string, any> = {}
 
-    console.log("BACKUP V2 DONE")
+    for (const file of metadataPackFiles) {
+      const packMeta = pathToPack[file.path]
+
+      if (!packMeta) {
+        throw new Error(`Missing final small-pack mapping for ${file.path}`)
+      }
+
+      nextFileState[file.path] = {
+        path: file.path,
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        hash: file.hash,
+        storage: "small-pack",
+        packHash: packMeta.packHash
+      }
+    }
+
+    for (const file of largeObjectInputs) {
+      nextFileState[file.path] = {
+        path: file.path,
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        hash: file.hash,
+        storage: "large-object"
+      }
+    }
+
+    await saveFileState({
+      accessToken,
+      fileId: structure.fileStateFileId,
+      data: nextFileState
+    })
+
+    console.log("SMALL PACK DEBUG", {
+      totalSmall: metadataPackFiles.length,
+      changedSmall: changedSmallFiles.length,
+      reusedSmall: unchangedSmallFiles.length
+    })
+    console.log("BACKUP V2 DONE", {
+      snapshotId,
+      files: files.length,
+      smallPackFiles: metadataPackFiles.length,
+      largeObjectFiles: largeObjectInputs.length
+    })
   } finally {
+    await saveHashCache(hashCachePath, nextHashCache)
     await safeRemove(tempDir)
   }
 }

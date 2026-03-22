@@ -13,6 +13,7 @@ export type SnapshotManifestFile =
   | {
       path: string
       size: number
+      hash: string
       storage: "small-pack"
       packHash: string
       packFileId: string

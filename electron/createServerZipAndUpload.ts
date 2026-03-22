@@ -67,6 +67,97 @@ use-native-transport=true
 view-distance=10
 white-list=false`;
 
+function parseTemplateToProps(template: string): Record<string, string> {
+  return Object.fromEntries(
+    template
+      .split("\n")
+      .filter((line) => line.includes("=") && !line.startsWith("#"))
+      .map((line) => {
+        const [key, ...rest] = line.split("=");
+        return [key, rest.join("=")];
+      })
+  );
+}
+
+function normalizeLevelType(value: string | undefined): string {
+  if (!value) return "minecraft\\:normal";
+
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === "default") return "minecraft\\:normal";
+  if (normalized === "normal") return "minecraft\\:normal";
+  if (normalized === "minecraft:normal") return "minecraft\\:normal";
+  if (normalized === "flat") return "minecraft\\:flat";
+  if (normalized === "minecraft:flat") return "minecraft\\:flat";
+  if (normalized === "largebiomes") return "minecraft\\:large_biomes";
+  if (normalized === "large_biomes") return "minecraft\\:large_biomes";
+  if (normalized === "minecraft:large_biomes") return "minecraft\\:large_biomes";
+  if (normalized === "amplified") return "minecraft\\:amplified";
+  if (normalized === "minecraft:amplified") return "minecraft\\:amplified";
+  if (normalized === "singlebiome") return "minecraft\\:single_biome_surface";
+  if (normalized === "single_biome_surface") return "minecraft\\:single_biome_surface";
+  if (normalized === "minecraft:single_biome_surface") return "minecraft\\:single_biome_surface";
+
+  return value;
+}
+
+function mapSettingsToServerProperties(
+  settings: Record<string, string>,
+  defaults: Record<string, string>
+): Record<string, string> {
+  const mapped: Record<string, string> = {};
+
+  const directMap: Record<string, string> = {
+    levelName: "level-name",
+    seed: "level-seed",
+    generateStructures: "generate-structures",
+    allowNether: "allow-nether",
+    viewDistance: "view-distance",
+    simulationDistance: "simulation-distance",
+    maxWorldSize: "max-world-size",
+    spawnProtection: "spawn-protection",
+    enableCommandBlock: "enable-command-block",
+    allowFlight: "allow-flight",
+    syncChunkWrites: "sync-chunk-writes",
+    maxPlayers: "max-players",
+    onlineMode: "online-mode",
+    whiteList: "white-list",
+    enforceWhitelist: "enforce-whitelist",
+    enableRcon: "enable-rcon",
+    rconPassword: "rcon.password",
+    resourcePack: "resource-pack",
+    enableStatus: "enable-status",
+    motd: "motd",
+    gamemode: "gamemode",
+    difficulty: "difficulty",
+    pvp: "pvp",
+    hardcore: "hardcore",
+  };
+
+  for (const [uiKey, propKey] of Object.entries(directMap)) {
+    const value = settings[uiKey];
+    if (typeof value === "string" && propKey in defaults) {
+      mapped[propKey] = value;
+    }
+  }
+
+  if (typeof settings.levelType === "string") {
+    mapped["level-type"] = normalizeLevelType(settings.levelType);
+  }
+
+  // level-name fallback
+  if (!mapped["level-name"] || !mapped["level-name"].trim()) {
+    mapped["level-name"] = "world";
+  }
+
+  // motd fallback from serverName if motd not explicitly set
+  if ((!mapped["motd"] || !mapped["motd"].trim()) && settings.serverName?.trim()) {
+    mapped["motd"] = settings.serverName.trim();
+  }
+
+  return mapped;
+}
+
 export async function createAndUploadServerZip({
   accessToken,
   driveFolderId,
@@ -85,26 +176,13 @@ export async function createAndUploadServerZip({
   const zip = new JSZip();
 
   // --- server.properties ---
-  const defaultProps: Record<string, string> = Object.fromEntries(
-    SERVER_PROPERTIES_TEMPLATE.split("\n")
-      .filter((line) => line.includes("=") && !line.startsWith("#"))
-      .map((line) => {
-        const [key, ...rest] = line.split("=");
-        return [key, rest.join("=")];
-      })
-  );
+  const defaultProps = parseTemplateToProps(SERVER_PROPERTIES_TEMPLATE);
+  const mappedSettings = mapSettingsToServerProperties(settings, defaultProps);
 
-  const validKeys = Object.keys(defaultProps);
-  const runtimeOverrideKeys = ["view-distance", "simulation-distance"];
-
-  const filteredSettings: Record<string, string> = {};
-  for (const [key, value] of Object.entries(settings)) {
-    if (validKeys.includes(key) && !runtimeOverrideKeys.includes(key)) {
-      filteredSettings[key] = value;
-    }
-  }
-
-  const finalProps = { ...defaultProps, ...filteredSettings };
+  const finalProps = {
+    ...defaultProps,
+    ...mappedSettings,
+  };
 
   const serverProperties = [
     `#Minecraft server properties`,
@@ -115,13 +193,10 @@ export async function createAndUploadServerZip({
   zip.file("server.properties", serverProperties);
 
   // --- metadata.json ---
-  const metadata: Record<string, string> = {};
-  for (const [key, value] of Object.entries(settings)) {
-    if (!validKeys.includes(key)) metadata[key] = value;
-  }
-  for (const key of runtimeOverrideKeys) {
-    if (key in settings) metadata[key] = settings[key];
-  }
+  const metadata: Record<string, string> = {
+    ...settings,
+  };
+
   if (!("mcVersion" in metadata)) metadata.mcVersion = mcVersion ?? "";
   if (!("loader" in metadata)) metadata.loader = loader ?? "";
 

@@ -4,6 +4,13 @@ export type PackIndexEntry = {
   fileId: string
   name: string
   size: number
+  entriesByPath?: Record<
+    string,
+    {
+      size: number
+      hash: string
+    }
+  >
 }
 
 export async function loadPackIndex({

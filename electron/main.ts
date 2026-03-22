@@ -1,5 +1,5 @@
 import { createSnapshot } from "./backup";
-import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, screen } from 'electron';
 import * as path from 'path';
 import * as fs from "fs";
 import { google } from "googleapis";
@@ -20,10 +20,13 @@ import { randomBytes } from "crypto";
 import open from "open";
 import type { AddressInfo } from "net";
 import net from "net";
+import { copyFile } from "fs/promises";
 import { pathToFileURL } from "url";
 import { backupServerV2 } from "./backup/backupServerV2";
-import { restoreSnapshotV2 } from "./backup/restoreSnapshotV2"
-import { ensureBackupStructure } from './backup/ensureBackupStructure'
+import { restoreSnapshotV2, verifySnapshotRestoreV2 } from "./backup/restoreSnapshotV2";
+import { Readable } from "stream";
+
+
 
 import { listSnapshotFolders } from "./backup/listSnapshotFolders";
 import { deleteSnapshotFolders } from "./backup/deleteSnapshotFolders";
@@ -38,8 +41,18 @@ let client_secret: string;
 const pidusage = require("pidusage");
 const natUpnp = require("nat-upnp");
 const upnpClient = natUpnp.createClient();
-
 let upnpAvailability: "unknown" | "available" | "unavailable" = "unknown";
+
+const accessTokenCache = new Map<
+  string,
+  { token: string; expiresAt: number }
+>();
+
+function getAccessTokenCacheKey(userId: string, driveId: string) {
+  return `${userId}::${driveId}`;
+}
+
+
 
 app.whenReady().then(() => {
   const oauthPath = app.isPackaged
@@ -129,6 +142,928 @@ async function authenticateWithGoogle(): Promise<any> {
   });
 }
 
+type ModSideValue = "required" | "optional" | "unsupported" | "unknown";
+type ModSideSupport = "server" | "client" | "both" | "optional" | "unknown";
+
+
+type ModDependencyType =
+  | "required"
+  | "optional"
+  | "incompatible"
+  | "embedded"
+  | "unknown";
+
+type ForgeLaunchInfo =
+  | {
+    mode: "jar";
+    jarPath: string;
+  }
+  | {
+    mode: "args";
+    userJvmArgsPath: string;
+    winArgsPath?: string;
+    unixArgsPath?: string;
+  };
+
+type ModDependency = {
+  projectId: string;
+  dependencyType: ModDependencyType;
+  title: string;
+  clientSide: ModSideValue;
+  serverSide: ModSideValue;
+  sideSupport: ModSideSupport;
+  alreadyInstalled: boolean;
+};
+
+type InstallWarningCode =
+  | "client-only"
+  | "unknown-side"
+  | "duplicate-project"
+  | "missing-required-dependencies";
+
+type InstallWarning = {
+  code: InstallWarningCode;
+  message: string;
+};
+
+type ModInstallPreview = {
+  success: boolean;
+  project?: {
+    provider: "modrinth";
+    projectId: string;
+    title: string;
+    versionId: string;
+    versionNumber?: string;
+    fileName: string;
+    clientSide: ModSideValue;
+    serverSide: ModSideValue;
+    sideSupport: ModSideSupport;
+  };
+  dependencies?: ModDependency[];
+  warnings?: InstallWarning[];
+  error?: string;
+};
+
+type DiscoveredMod = {
+  id: string;
+  provider: "modrinth" | "curseforge";
+  projectId: string;
+  slug?: string;
+  title: string;
+  description: string;
+  iconUrl?: string;
+  downloads?: number;
+  loaders: string[];
+  gameVersions: string[];
+  clientSide: ModSideValue;
+  serverSide: ModSideValue;
+  sideSupport: ModSideSupport;
+};
+
+function classifyModSide(args: {
+  clientSide?: string;
+  serverSide?: string;
+}): ModSideSupport {
+  const client = (args.clientSide || "unknown").toLowerCase();
+  const server = (args.serverSide || "unknown").toLowerCase();
+
+  if (client === "required" && server === "required") return "both";
+  if (server === "required" && client !== "required") return "server";
+  if (client === "required" && server !== "required") return "client";
+
+  if (
+    ["optional", "unsupported", "unknown"].includes(client) &&
+    ["optional", "unsupported", "unknown"].includes(server)
+  ) {
+    return "optional";
+  }
+
+  return "unknown";
+}
+
+function getModrinthHeaders() {
+  return {
+    "User-Agent": "mc-server-manager/1.0 (desktop app, contact: local-app)",
+    "Content-Type": "application/json",
+  };
+}
+
+function normalizeLoaderForModrinth(loader: string): string {
+  const normalized = (loader || "").toLowerCase();
+  if (normalized === "neoforge") return "neoforge";
+  if (normalized === "forge") return "forge";
+  if (normalized === "fabric") return "fabric";
+  if (normalized === "quilt") return "quilt";
+  return normalized;
+}
+
+async function forgeArtifactExists(mcVersion: string, loaderVersion: string): Promise<boolean> {
+  const installerFileName = `forge-${mcVersion}-${loaderVersion}-installer.jar`;
+  const installerUrl =
+    `https://maven.minecraftforge.net/net/minecraftforge/forge/` +
+    `${encodeURIComponent(mcVersion)}-${encodeURIComponent(loaderVersion)}/` +
+    `${installerFileName}`;
+
+  const res = await fetch(installerUrl, { method: "HEAD" });
+  return res.ok;
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureEmptyDir(dirPath: string) {
+  await fs.promises.rm(dirPath, { recursive: true, force: true });
+  await fs.promises.mkdir(dirPath, { recursive: true });
+}
+
+async function copyDirectoryRecursive(sourceDir: string, targetDir: string) {
+  await fs.promises.mkdir(targetDir, { recursive: true });
+
+  const entries = await fs.promises.readdir(sourceDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const src = path.join(sourceDir, entry.name);
+    const dst = path.join(targetDir, entry.name);
+
+    if (entry.isDirectory()) {
+      await copyDirectoryRecursive(src, dst);
+    } else if (entry.isFile()) {
+      await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+      await copyFile(src, dst);
+    }
+  }
+}
+
+async function copyOptionalFileIfExists(sourceFile: string, targetFile: string): Promise<boolean> {
+  if (!(await pathExists(sourceFile))) return false;
+
+  await fs.promises.mkdir(path.dirname(targetFile), { recursive: true });
+  await copyFile(sourceFile, targetFile);
+  return true;
+}
+
+async function copyOptionalFolderIfExists(sourceDir: string, targetDir: string): Promise<boolean> {
+  const stat = await fs.promises.stat(sourceDir).catch(() => null);
+  if (!stat || !stat.isDirectory()) return false;
+
+  await ensureEmptyDir(targetDir);
+  await copyDirectoryRecursive(sourceDir, targetDir);
+  return true;
+}
+
+async function readImportedLevelName(sourceServerPath: string): Promise<string> {
+  const propsPath = path.join(sourceServerPath, "server.properties");
+
+  try {
+    const raw = await fs.promises.readFile(propsPath, "utf8");
+    const parsed = ini.parse(raw);
+    const levelName = String(parsed["level-name"] || "").trim();
+    return levelName || "world";
+  } catch {
+    return "world";
+  }
+}
+
+async function uploadLocalFolderToDriveRecursive(args: {
+  drive: any;
+  parentFolderId: string;
+  localSourcePath: string;
+}): Promise<number> {
+  const { drive, parentFolderId, localSourcePath } = args;
+
+  const stat = await fs.promises.stat(localSourcePath).catch(() => null);
+  if (!stat || !stat.isDirectory()) return 0;
+
+  const entries = await fs.promises.readdir(localSourcePath, { withFileTypes: true });
+  let uploadedCount = 0;
+
+  for (const entry of entries) {
+    const localPath = path.join(localSourcePath, entry.name);
+
+    if (entry.isDirectory()) {
+      const childFolderId = await getOrCreateChildFolderId(drive, parentFolderId, entry.name);
+      uploadedCount += await uploadLocalFolderToDriveRecursive({
+        drive,
+        parentFolderId: childFolderId,
+        localSourcePath: localPath,
+      });
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+
+    const existing = await drive.files.list({
+      q: `'${parentFolderId}' in parents and name='${entry.name.replace(/'/g, "\\'")}' and trashed=false`,
+      fields: "files(id, name)",
+      pageSize: 50,
+    });
+
+    for (const oldFile of existing.data.files ?? []) {
+      await drive.files.delete({ fileId: oldFile.id! });
+    }
+
+    await drive.files.create({
+      requestBody: {
+        name: entry.name,
+        parents: [parentFolderId],
+      },
+      media: {
+        body: fs.createReadStream(localPath),
+      },
+      fields: "id",
+    });
+
+    uploadedCount += 1;
+  }
+
+  return uploadedCount;
+}
+
+async function writeImportedServerProperties(args: {
+  serverDir: string;
+  levelName?: string;
+  port?: number | null;
+}) {
+  const { serverDir, levelName, port } = args;
+  const propsPath = path.join(serverDir, "server.properties");
+
+  let existing = "";
+  try {
+    existing = await fs.promises.readFile(propsPath, "utf8");
+  } catch {
+    existing = "";
+  }
+
+  const parsed = ini.parse(existing);
+
+  parsed["level-name"] = levelName && levelName.trim() ? levelName.trim() : "world";
+  parsed["server-port"] = typeof port === "number" ? String(port) : (parsed["server-port"] || "25565");
+  parsed["enable-query"] = parsed["enable-query"] ?? "false";
+  parsed["enable-rcon"] = parsed["enable-rcon"] ?? "false";
+  parsed["motd"] = parsed["motd"] ?? "A Minecraft Server";
+
+  const serialized = ini.stringify(parsed);
+  await fs.promises.writeFile(propsPath, serialized, "utf8");
+}
+
+function parseBooleanLike(value: any, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return fallback;
+}
+
+function parseNumberLike(value: any, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function extractImportableServerSettingsFromProperties(raw: string) {
+  const parsed = ini.parse(raw);
+
+  return {
+    motd: String(parsed["motd"] ?? "A Minecraft Server"),
+    levelName: String(parsed["level-name"] ?? "world"),
+    gamemode: String(parsed["gamemode"] ?? "survival"),
+    difficulty: String(parsed["difficulty"] ?? "easy"),
+    pvp: parseBooleanLike(parsed["pvp"], true),
+    hardcore: parseBooleanLike(parsed["hardcore"], false),
+    allowFlight: parseBooleanLike(parsed["allow-flight"], false),
+    maxPlayers: parseNumberLike(parsed["max-players"], 20),
+    onlineMode: parseBooleanLike(parsed["online-mode"], true),
+    whiteList: parseBooleanLike(parsed["white-list"], false),
+    enforceWhitelist: parseBooleanLike(parsed["enforce-whitelist"], false),
+    enableCommandBlock: parseBooleanLike(parsed["enable-command-block"], false),
+    allowNether: parseBooleanLike(parsed["allow-nether"], true),
+    enableStatus: parseBooleanLike(parsed["enable-status"], true),
+    enableRcon: parseBooleanLike(parsed["enable-rcon"], false),
+    rconPassword: String(parsed["rcon.password"] ?? ""),
+    resourcePack: String(parsed["resource-pack"] ?? ""),
+    viewDistance: parseNumberLike(parsed["view-distance"], 10),
+    maxWorldSize: parseNumberLike(parsed["max-world-size"], 10000),
+    spawnProtection: parseNumberLike(parsed["spawn-protection"], 16),
+    syncChunkWrites: parseBooleanLike(parsed["sync-chunk-writes"], true),
+  };
+}
+
+function normalizeDependencyType(value: any): ModDependencyType {
+  const v = String(value || "unknown").toLowerCase();
+  if (v === "required") return "required";
+  if (v === "optional") return "optional";
+  if (v === "incompatible") return "incompatible";
+  if (v === "embedded") return "embedded";
+  return "unknown";
+}
+
+async function fetchCompatibleModrinthVersions(args: {
+  projectId: string;
+  loader: string;
+  mcVersion: string;
+}) {
+  const normalizedLoader = normalizeLoaderForModrinth(args.loader);
+
+  const versionsUrl =
+    `https://api.modrinth.com/v2/project/${args.projectId}/version?` +
+    new URLSearchParams({
+      loaders: JSON.stringify([normalizedLoader]),
+      game_versions: JSON.stringify([args.mcVersion]),
+    }).toString();
+
+  const res = await fetch(versionsUrl, { headers: getModrinthHeaders() });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Failed to fetch versions for ${args.projectId}: ${res.status} ${res.statusText}${text ? ` ${text}` : ""}`
+    );
+  }
+
+  const versions: any[] = await res.json();
+  return Array.isArray(versions) ? versions : [];
+}
+
+function pickPrimaryVersionFile(version: any) {
+  return version?.files?.find((f: any) => f.primary) || version?.files?.[0] || null;
+}
+
+async function fetchModrinthProject(projectId: string) {
+  const res = await fetch(`https://api.modrinth.com/v2/project/${projectId}`, {
+    headers: getModrinthHeaders(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Failed to fetch project ${projectId}: ${res.status} ${res.statusText}${text ? ` ${text}` : ""}`
+    );
+  }
+
+  return await res.json();
+}
+
+async function buildModInstallPreview(args: {
+  projectId: string;
+  loader: string;
+  mcVersion: string;
+  installedProjectIds?: string[];
+}): Promise<ModInstallPreview> {
+  const { projectId, loader, mcVersion } = args;
+  const installedProjectIds = new Set((args.installedProjectIds || []).filter(Boolean));
+
+  const versions = await fetchCompatibleModrinthVersions({
+    projectId,
+    loader,
+    mcVersion,
+  });
+
+  if (!versions.length) {
+    throw new Error("No compatible mod version found.");
+  }
+
+  const version = versions[0];
+  const file = pickPrimaryVersionFile(version);
+  if (!file?.filename) {
+    throw new Error("No downloadable file found.");
+  }
+
+  const projectData = await fetchModrinthProject(projectId);
+  const clientSide = (projectData.client_side || "unknown") as ModSideValue;
+  const serverSide = (projectData.server_side || "unknown") as ModSideValue;
+  const sideSupport = classifyModSide({ clientSide, serverSide });
+
+  const warnings: InstallWarning[] = [];
+
+  if (sideSupport === "client") {
+    warnings.push({
+      code: "client-only",
+      message: `${projectData.title || projectId} looks client-side only.`,
+    });
+  }
+
+  if (sideSupport === "unknown") {
+    warnings.push({
+      code: "unknown-side",
+      message: `${projectData.title || projectId} has unknown server/client support.`,
+    });
+  }
+
+  if (installedProjectIds.has(projectId)) {
+    warnings.push({
+      code: "duplicate-project",
+      message: `${projectData.title || projectId} is already installed on this server.`,
+    });
+  }
+
+  const rawDependencies = Array.isArray(version.dependencies) ? version.dependencies : [];
+
+  const dependencies: ModDependency[] = [];
+  for (const dep of rawDependencies) {
+    const depType = normalizeDependencyType(dep?.dependency_type);
+    const depProjectId = String(dep?.project_id || "").trim();
+
+    if (!depProjectId || depType !== "required") continue;
+
+    const depProject = await fetchModrinthProject(depProjectId);
+    const depClientSide = (depProject.client_side || "unknown") as ModSideValue;
+    const depServerSide = (depProject.server_side || "unknown") as ModSideValue;
+
+    dependencies.push({
+      projectId: depProjectId,
+      dependencyType: depType,
+      title: depProject.title || depProjectId,
+      clientSide: depClientSide,
+      serverSide: depServerSide,
+      sideSupport: classifyModSide({
+        clientSide: depClientSide,
+        serverSide: depServerSide,
+      }),
+      alreadyInstalled: installedProjectIds.has(depProjectId),
+    });
+  }
+
+  if (dependencies.some((d) => !d.alreadyInstalled)) {
+    warnings.push({
+      code: "missing-required-dependencies",
+      message: "This mod requires additional dependencies.",
+    });
+  }
+
+  return {
+    success: true,
+    project: {
+      provider: "modrinth",
+      projectId,
+      title: projectData.title || "Unknown",
+      versionId: version.id,
+      versionNumber: version.version_number || "",
+      fileName: file.filename,
+      clientSide,
+      serverSide,
+      sideSupport,
+    },
+    dependencies,
+    warnings,
+  };
+}
+
+async function uploadModFileToDrive(args: {
+  accessToken: string;
+  serverId: string;
+  loader: string;
+  fileName: string;
+  fileBuffer: Buffer;
+}) {
+  const drive = createDriveClient(args.accessToken);
+
+  const serverRootId = await ensureDriveFolderPath({
+    accessToken: args.accessToken,
+    serverId: args.serverId,
+    loader: args.loader,
+  });
+
+  const modsFolderId = await getOrCreateChildFolderId(drive, serverRootId, "mods");
+
+  const existing = await drive.files.list({
+    q: `'${modsFolderId}' in parents and name='${args.fileName.replace(/'/g, "\\'")}' and trashed=false`,
+    fields: "files(id)",
+  });
+
+  for (const old of existing.data.files ?? []) {
+    await drive.files.delete({ fileId: old.id! });
+  }
+
+  const uploaded = await drive.files.create({
+    requestBody: {
+      name: args.fileName,
+      parents: [modsFolderId],
+    },
+    media: {
+      mimeType: "application/java-archive",
+      body: Readable.from(args.fileBuffer),
+    },
+    fields: "id, name, size, createdTime",
+  });
+
+  if (!uploaded.data.id || !uploaded.data.name) {
+    throw new Error(`Failed to upload ${args.fileName}`);
+  }
+
+  return uploaded.data;
+}
+
+async function installSingleModrinthProject(args: {
+  projectId: string;
+  accessToken: string;
+  serverId: string;
+  loader: string;
+  mcVersion: string;
+}) {
+  const versions = await fetchCompatibleModrinthVersions({
+    projectId: args.projectId,
+    loader: args.loader,
+    mcVersion: args.mcVersion,
+  });
+
+  if (!versions.length) {
+    throw new Error(`No compatible version found for dependency ${args.projectId}`);
+  }
+
+  const version = versions[0];
+  const file = pickPrimaryVersionFile(version);
+  if (!file?.url) {
+    throw new Error(`No downloadable file found for ${args.projectId}`);
+  }
+
+  const fileBuffer = await downloadFileToBuffer(file.url);
+  const fileName = file.filename || `${args.projectId}.jar`;
+
+  const uploaded = await uploadModFileToDrive({
+    accessToken: args.accessToken,
+    serverId: args.serverId,
+    loader: args.loader,
+    fileName,
+    fileBuffer,
+  });
+
+  const projectData = await fetchModrinthProject(args.projectId);
+  const clientSide = (projectData.client_side || "unknown") as ModSideValue;
+  const serverSide = (projectData.server_side || "unknown") as ModSideValue;
+
+  return {
+    provider: "modrinth" as const,
+    projectId: args.projectId,
+    title: projectData.title || "Unknown",
+    versionId: version.id,
+    versionNumber: version.version_number || "",
+    file: {
+      id: uploaded.id!,
+      name: uploaded.name!,
+      size: uploaded.size,
+      createdTime: uploaded.createdTime,
+    },
+    clientSide,
+    serverSide,
+    sideSupport: classifyModSide({ clientSide, serverSide }),
+  };
+}
+
+async function applyServerSettingsOverride(args: {
+  serverDir: string;
+  serverSettingsOverride?: Record<string, any>;
+  port?: number | null;
+}) {
+  const { serverDir, serverSettingsOverride, port } = args;
+
+  if (!serverSettingsOverride) {
+    if (typeof port === "number") {
+      await writeServerPropertiesFile(serverDir, {
+        "server-port": String(port),
+      });
+    }
+    return;
+  }
+
+  const updates: Record<string, string> = {
+    "motd": String(serverSettingsOverride.motd ?? "A Minecraft Server"),
+    "level-name": String(serverSettingsOverride.levelName ?? "world"),
+    "gamemode": String(serverSettingsOverride.gamemode ?? "survival"),
+    "difficulty": String(serverSettingsOverride.difficulty ?? "easy"),
+    "pvp": String(!!serverSettingsOverride.pvp),
+    "hardcore": String(!!serverSettingsOverride.hardcore),
+    "allow-flight": String(!!serverSettingsOverride.allowFlight),
+    "max-players": String(serverSettingsOverride.maxPlayers ?? 20),
+    "online-mode": String(!!serverSettingsOverride.onlineMode),
+    "white-list": String(!!serverSettingsOverride.whiteList),
+    "enforce-whitelist": String(!!serverSettingsOverride.enforceWhitelist),
+    "enable-command-block": String(!!serverSettingsOverride.enableCommandBlock),
+    "allow-nether": String(!!serverSettingsOverride.allowNether),
+    "enable-status": String(!!serverSettingsOverride.enableStatus),
+    "enable-rcon": String(!!serverSettingsOverride.enableRcon),
+    "rcon.password": String(serverSettingsOverride.rconPassword ?? ""),
+    "resource-pack": String(serverSettingsOverride.resourcePack ?? ""),
+    "view-distance": String(serverSettingsOverride.viewDistance ?? 10),
+    "max-world-size": String(serverSettingsOverride.maxWorldSize ?? 10000),
+    "spawn-protection": String(serverSettingsOverride.spawnProtection ?? 16),
+    "sync-chunk-writes": String(serverSettingsOverride.syncChunkWrites ?? true),
+    "enable-query": "false",
+  };
+
+  if (typeof port === "number") {
+    updates["server-port"] = String(port);
+  }
+
+  await writeServerPropertiesFile(serverDir, updates);
+}
+
+ipcMain.handle("preview-mod-install", async (_event, args) => {
+  try {
+    const { provider, projectId, loader, mcVersion, installedProjectIds } = args ?? {};
+
+    if (provider !== "modrinth") {
+      return {
+        success: false,
+        error: "Only Modrinth is implemented right now.",
+      };
+    }
+
+    if (!projectId || !loader || !mcVersion) {
+      throw new Error("Missing parameters for preview-mod-install.");
+    }
+
+    return await buildModInstallPreview({
+      projectId,
+      loader,
+      mcVersion,
+      installedProjectIds: Array.isArray(installedProjectIds) ? installedProjectIds : [],
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
+ipcMain.handle("search-mods", async (_event, args) => {
+  try {
+    const { provider, query, loader, mcVersion } = args ?? {};
+
+    if (provider !== "modrinth") {
+      return {
+        success: false,
+        error: "Only Modrinth is implemented right now.",
+        results: [],
+      };
+    }
+
+    const trimmedQuery = String(query || "").trim();
+    const normalizedLoader = normalizeLoaderForModrinth(String(loader || ""));
+    const normalizedMcVersion = String(mcVersion || "").trim();
+
+    if (!trimmedQuery) {
+      return { success: true, results: [] };
+    }
+
+    const facets = [
+      ["project_type:mod"],
+      normalizedLoader ? [`categories:${normalizedLoader}`] : [],
+      normalizedMcVersion ? [`versions:${normalizedMcVersion}`] : [],
+    ].filter((entry) => entry.length > 0);
+
+    const url =
+      `https://api.modrinth.com/v2/search?` +
+      new URLSearchParams({
+        query: trimmedQuery,
+        limit: "20",
+        index: "relevance",
+        facets: JSON.stringify(facets),
+      }).toString();
+
+    const res = await fetch(url, {
+      headers: getModrinthHeaders(),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `Modrinth search failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`
+      );
+    }
+
+    const data: any = await res.json();
+    const hits = Array.isArray(data?.hits) ? data.hits : [];
+
+    const results: DiscoveredMod[] = hits.map((hit: any) => {
+      const clientSide = (hit.client_side || "unknown") as ModSideValue;
+      const serverSide = (hit.server_side || "unknown") as ModSideValue;
+
+      return {
+        id: hit.project_id || hit.slug || hit.title,
+        provider: "modrinth",
+        projectId: hit.project_id,
+        slug: hit.slug,
+        title: hit.title || "Untitled",
+        description: hit.description || "",
+        iconUrl: hit.icon_url || undefined,
+        downloads: typeof hit.downloads === "number" ? hit.downloads : undefined,
+        loaders: Array.isArray(hit.display_categories)
+          ? hit.display_categories.filter((x: any) =>
+            ["fabric", "forge", "neoforge", "quilt"].includes(String(x).toLowerCase())
+          )
+          : [],
+        gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
+        clientSide,
+        serverSide,
+        sideSupport: classifyModSide({ clientSide, serverSide }),
+      };
+    });
+
+    return {
+      success: true,
+      results,
+    };
+  } catch (error) {
+    console.error("Failed to search mods:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      results: [],
+    };
+  }
+});
+
+
+
+ipcMain.removeHandler("install-discovered-mod");
+
+ipcMain.handle("install-discovered-mod", async (_event, args) => {
+  try {
+    const {
+      provider,
+      projectId,
+      serverId,
+      loader,
+      mcVersion,
+      accessToken,
+      installedProjectIds,
+      installDependencyProjectIds,
+      replaceExistingProjectIds,
+    } = args ?? {};
+
+    if (provider !== "modrinth") {
+      return {
+        success: false,
+        error: "Only Modrinth is implemented right now.",
+      };
+    }
+
+    const missing: string[] = [];
+    if (!projectId) missing.push("projectId");
+    if (!serverId) missing.push("serverId");
+    if (!loader) missing.push("loader");
+    if (!mcVersion) missing.push("mcVersion");
+    if (!accessToken) missing.push("accessToken");
+
+    if (missing.length > 0) {
+      throw new Error(`Missing parameters for install-discovered-mod: ${missing.join(", ")}`);
+    }
+
+    const installedSet = new Set<string>(
+      Array.isArray(installedProjectIds) ? installedProjectIds.filter(Boolean) : []
+    );
+    const replaceSet = new Set<string>(
+      Array.isArray(replaceExistingProjectIds) ? replaceExistingProjectIds.filter(Boolean) : []
+    );
+    const dependencySet = new Set<string>(
+      Array.isArray(installDependencyProjectIds) ? installDependencyProjectIds.filter(Boolean) : []
+    );
+
+    const preview = await buildModInstallPreview({
+      projectId,
+      loader,
+      mcVersion,
+      installedProjectIds: Array.from(installedSet),
+    });
+
+    if (!preview.success || !preview.project) {
+      throw new Error(preview.error || "Failed to prepare install preview.");
+    }
+
+    if (installedSet.has(projectId) && !replaceSet.has(projectId)) {
+      throw new Error("That mod project is already installed.");
+    }
+
+    const requiredMissingDeps = (preview.dependencies || []).filter(
+      (dep) => dep.dependencyType === "required" && !dep.alreadyInstalled
+    );
+
+    for (const dep of requiredMissingDeps) {
+      if (!dependencySet.has(dep.projectId)) {
+        throw new Error(`Missing required dependency selection: ${dep.title}`);
+      }
+    }
+
+    const installed: Array<{
+      provider: "modrinth";
+      projectId: string;
+      title: string;
+      versionId: string;
+      versionNumber?: string;
+      clientSide: ModSideValue;
+      serverSide: ModSideValue;
+      sideSupport: ModSideSupport;
+      file: {
+        id: string;
+        name: string;
+        size?: string | null;
+        createdTime?: string | null;
+      };
+      isDependency?: boolean;
+    }> = [];
+
+    for (const dep of requiredMissingDeps) {
+      const depInstalled = await installSingleModrinthProject({
+        projectId: dep.projectId,
+        accessToken,
+        serverId,
+        loader,
+        mcVersion,
+      });
+
+      installed.push({
+        ...depInstalled,
+        isDependency: true,
+      });
+    }
+
+    const mainInstalled = await installSingleModrinthProject({
+      projectId,
+      accessToken,
+      serverId,
+      loader,
+      mcVersion,
+    });
+
+    installed.push({
+      ...mainInstalled,
+      isDependency: false,
+    });
+
+    const mainProject = installed.find((item) => !item.isDependency)!;
+
+    return {
+      success: true,
+      project: {
+        provider: mainProject.provider,
+        projectId: mainProject.projectId,
+        title: mainProject.title,
+        versionId: mainProject.versionId,
+        versionNumber: mainProject.versionNumber,
+        clientSide: mainProject.clientSide,
+        serverSide: mainProject.serverSide,
+        sideSupport: mainProject.sideSupport,
+      },
+      file: mainProject.file,
+      installed,
+    };
+  } catch (error) {
+    console.error("Failed to install discovered mod:", error);
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
+
+ipcMain.handle("read-importable-server-properties", async (_event, args) => {
+  try {
+    const { sourceServerPath } = args ?? {};
+
+    if (!sourceServerPath || typeof sourceServerPath !== "string") {
+      throw new Error("Missing sourceServerPath for read-importable-server-properties.");
+    }
+
+    const propsPath = path.join(sourceServerPath, "server.properties");
+    const exists = await pathExists(propsPath);
+
+    if (!exists) {
+      return {
+        success: true,
+        found: false,
+        data: null,
+      };
+    }
+
+    const raw = await fs.promises.readFile(propsPath, "utf8");
+    const data = extractImportableServerSettingsFromProperties(raw);
+
+    return {
+      success: true,
+      found: true,
+      data,
+    };
+  } catch (error) {
+    console.error("Failed to read importable server properties:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      found: false,
+      data: null,
+    };
+  }
+});
+
 async function findChildFolderId(
   drive: any,
   parentId: string,
@@ -173,6 +1108,39 @@ async function getOrCreateChildFolderId(
   return created.data.id;
 }
 
+async function downloadDriveFileToPathWithRetry(args: {
+  drive: any;
+  fileId: string;
+  targetPath: string;
+  attempts?: number;
+}) {
+  const { drive, fileId, targetPath, attempts = 3 } = args;
+
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await downloadDriveFileToPath({
+        drive,
+        fileId,
+        targetPath,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `[mc-server-manager] Drive download failed for ${fileId} (attempt ${attempt}/${attempts})`,
+        error
+      );
+
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+      }
+    }
+  }
+
+  throw lastError;
+}
 
 async function downloadDriveFileToPath(args: {
   drive: any;
@@ -197,6 +1165,21 @@ async function downloadDriveFileToPath(args: {
 
     streamRes.data.pipe(out);
   });
+}
+
+function resolveJavaExecutable(): string {
+  const possiblePaths = [
+    process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, "bin", "java.exe"),
+
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-21\\bin\\java.exe",
+    "C:\\Program Files\\Java\\jdk-21\\bin\\java.exe",
+  ];
+
+  for (const p of possiblePaths) {
+    if (p && fs.existsSync(p)) return p;
+  }
+
+  return "java"; // fallback
 }
 
 async function runWithConcurrency<T>(
@@ -245,13 +1228,14 @@ async function downloadDriveFolderRecursive(args: {
     (file: any) => file.mimeType !== "application/vnd.google-apps.folder"
   );
 
-  await runWithConcurrency(normalFiles, 4, async (file: any) => {
+  await runWithConcurrency(normalFiles, 3, async (file: any) => {
     const targetPath = path.join(localDestination, file.name!);
 
-    await downloadDriveFileToPath({
+    await downloadDriveFileToPathWithRetry({
       drive,
       fileId: file.id!,
       targetPath,
+      attempts: 3,
     });
   });
 
@@ -372,6 +1356,287 @@ async function prepareFabricRuntime(
   return { success: true };
 }
 
+async function downloadFileToBuffer(url: string): Promise<Buffer> {
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(
+      `Failed to download ${url}: ${res.status} ${res.statusText}` +
+      (errText ? ` - ${errText}` : "")
+    );
+  }
+
+  return await res.buffer();
+}
+
+async function fileExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(targetPath, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectForgeLaunch(extractPath: string): Promise<ForgeLaunchInfo | null> {
+  const userJvmArgsPath = path.join(extractPath, "user_jvm_args.txt");
+  const runBatPath = path.join(extractPath, "run.bat");
+  const runShPath = path.join(extractPath, "run.sh");
+
+  const hasUserJvmArgs = await fileExists(userJvmArgsPath);
+
+  const forgeLibrariesRoot = path.join(
+    extractPath,
+    "libraries",
+    "net",
+    "minecraftforge",
+    "forge"
+  );
+
+  const forgeVersionDirStat = await fs.promises.stat(forgeLibrariesRoot).catch(() => null);
+
+  if (hasUserJvmArgs && forgeVersionDirStat?.isDirectory()) {
+    const forgeVersionDirs = await fs.promises.readdir(forgeLibrariesRoot, {
+      withFileTypes: true,
+    });
+
+    for (const dir of forgeVersionDirs) {
+      if (!dir.isDirectory()) continue;
+
+      const candidateBase = path.join(forgeLibrariesRoot, dir.name);
+      const winArgsPath = path.join(candidateBase, "win_args.txt");
+      const unixArgsPath = path.join(candidateBase, "unix_args.txt");
+
+      const hasWinArgs = await fileExists(winArgsPath);
+      const hasUnixArgs = await fileExists(unixArgsPath);
+
+      if (hasWinArgs || hasUnixArgs) {
+        return {
+          mode: "args",
+          userJvmArgsPath,
+          winArgsPath: hasWinArgs ? winArgsPath : undefined,
+          unixArgsPath: hasUnixArgs ? unixArgsPath : undefined,
+        };
+      }
+    }
+  }
+
+  const entries = await fs.promises.readdir(extractPath, { withFileTypes: true });
+  const preferredNames: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+
+    const lower = entry.name.toLowerCase();
+    if (!lower.endsWith(".jar")) continue;
+    if (lower.includes("installer")) continue;
+
+    if (
+      lower.startsWith("forge-") ||
+      lower.startsWith("minecraft_server.") ||
+      lower.includes("server")
+    ) {
+      preferredNames.push(path.join(extractPath, entry.name));
+    }
+  }
+
+  if (preferredNames.length > 0) {
+    const forgeJar =
+      preferredNames.find((p) => path.basename(p).toLowerCase().startsWith("forge-")) ??
+      preferredNames[0];
+
+    return {
+      mode: "jar",
+      jarPath: forgeJar,
+    };
+  }
+
+  return null;
+}
+
+async function runForgeInstaller(
+  installerJarPath: string,
+  extractPath: string
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const javaExec = resolveJavaExecutable();
+
+  return await new Promise((resolve, reject) => {
+    const proc = spawn(
+      javaExec,
+      ["-jar", installerJarPath, "--installServer"],
+      {
+        cwd: extractPath,
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    let stderr = "";
+    let stdout = "";
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", reject);
+
+    proc.on("close", (code) => {
+      resolve({
+        code: code ?? null,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+ipcMain.handle("get-forge-loader-versions", async (_event, mcVersion: string) => {
+  try {
+    const normalizedMcVersion = String(mcVersion || "").trim();
+
+    if (!normalizedMcVersion) {
+      return { success: true, versions: [] };
+    }
+
+    const pageUrl =
+      `https://files.minecraftforge.net/net/minecraftforge/forge/index_${encodeURIComponent(normalizedMcVersion)}.html`;
+
+    const res = await fetch(pageUrl);
+    if (!res.ok) {
+      return {
+        success: false,
+        error: `Failed to fetch Forge versions for Minecraft ${normalizedMcVersion}: ${res.status} ${res.statusText}`,
+        versions: [],
+      };
+    }
+
+    const html = await res.text();
+
+    // Grab Forge version numbers from installer links like:
+    // forge-1.21.10-60.1.9-installer.jar
+    const regex = new RegExp(
+      `forge-${normalizedMcVersion.replace(/\./g, "\\.")}-([0-9][A-Za-z0-9_.-]*)-installer\\.jar`,
+      "g"
+    );
+
+    const found = new Set<string>();
+    let match: RegExpExecArray | null = null;
+
+    while ((match = regex.exec(html)) !== null) {
+      if (match[1]) {
+        found.add(match[1]);
+      }
+    }
+
+    const versions = Array.from(found);
+
+    // Sort descending, numeric-aware
+    versions.sort((a, b) =>
+      b.localeCompare(a, undefined, { numeric: true, sensitivity: "base" })
+    );
+
+    return { success: true, versions };
+  } catch (error) {
+    console.error("Failed to fetch Forge loader versions:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      versions: [],
+    };
+  }
+});
+
+async function prepareForgeRuntime(
+  mcVersion: string,
+  loaderVersion: string,
+  extractPath: string
+) {
+  if (!mcVersion?.trim()) {
+    throw new Error("Forge runtime requires a Minecraft version.");
+  }
+
+  if (!loaderVersion?.trim()) {
+    throw new Error("Forge runtime requires a loader version.");
+  }
+  const exists = await forgeArtifactExists(mcVersion, loaderVersion);
+
+  if (!exists) {
+    throw new Error(
+      `Invalid Forge version pair: Minecraft ${mcVersion} is not available with Forge ${loaderVersion}. ` +
+      `Pick a Forge build that belongs to that Minecraft version.`
+    );
+  }
+  await fs.promises.mkdir(extractPath, { recursive: true });
+  await fs.promises.mkdir(path.join(extractPath, "mods"), { recursive: true });
+  await fs.promises.mkdir(path.join(extractPath, "config"), { recursive: true });
+
+  const installerFileName = `forge-${mcVersion}-${loaderVersion}-installer.jar`;
+  const installerUrl =
+    `https://maven.minecraftforge.net/net/minecraftforge/forge/` +
+    `${encodeURIComponent(mcVersion)}-${encodeURIComponent(loaderVersion)}/` +
+    `${installerFileName}`;
+
+  const installerJarPath = path.join(extractPath, installerFileName);
+
+  const installerBuffer = await downloadFileToBuffer(installerUrl);
+  await fs.promises.writeFile(installerJarPath, installerBuffer);
+
+  const installResult = await runForgeInstaller(installerJarPath, extractPath);
+
+  if (installResult.code !== 0) {
+    console.warn(
+      "[mc-server-manager] Forge installer exited non-zero, checking for usable runtime anyway.",
+      {
+        code: installResult.code,
+        stdout: installResult.stdout,
+        stderr: installResult.stderr,
+      }
+    );
+  }
+
+  const detectedLaunch = await detectForgeLaunch(extractPath);
+
+  if (!detectedLaunch) {
+    const rootEntries = await fs.promises.readdir(extractPath).catch(() => []);
+    throw new Error(
+      "Forge installer completed, but no runnable Forge runtime was detected. " +
+      `Root contents: ${rootEntries.join(", ")}`
+    );
+  }
+
+  const eulaPath = path.join(extractPath, "eula.txt");
+  if (!(await fileExists(eulaPath))) {
+    await fs.promises.writeFile(eulaPath, "eula=true\n", "utf8");
+  }
+
+  if (detectedLaunch.mode === "jar") {
+    const normalizedJarPath = path.join(extractPath, "server.jar");
+
+    if (path.resolve(detectedLaunch.jarPath) !== path.resolve(normalizedJarPath)) {
+      await fs.promises.copyFile(detectedLaunch.jarPath, normalizedJarPath);
+    }
+
+    return {
+      success: true,
+      launchMode: "jar" as const,
+      launcherJar: normalizedJarPath,
+      detectedLaunchJar: path.basename(detectedLaunch.jarPath),
+    };
+  }
+
+  return {
+    success: true,
+    launchMode: "forge-args" as const,
+    userJvmArgsPath: detectedLaunch.userJvmArgsPath,
+    winArgsPath: detectedLaunch.winArgsPath ?? null,
+    unixArgsPath: detectedLaunch.unixArgsPath ?? null,
+  };
+}
+
 ipcMain.handle("download-drive-folder", async (_event, args) => {
   try {
     const { accessToken, serverRootFolderId, folderName, localDestination } = args;
@@ -401,6 +1666,18 @@ ipcMain.handle("download-drive-folder", async (_event, args) => {
   }
 });
 
+ipcMain.handle("select-world-folder", async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openDirectory"],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
 ipcMain.handle("select-mod-files", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openFile", "multiSelections"],
@@ -411,6 +1688,407 @@ ipcMain.handle("select-mod-files", async () => {
 
   if (result.canceled) return [];
   return result.filePaths;
+});
+
+ipcMain.handle("import-existing-world", async (_event, args) => {
+  try {
+    const {
+      accessToken,
+      serverId,
+      loader,
+      mcVersion,
+      loaderVersion,
+      sourceWorldPath,
+      extractPath,
+      retention = 10,
+      port = 25565,
+    } = args ?? {};
+
+    if (!accessToken) {
+      throw new Error("Missing accessToken for import-existing-world.");
+    }
+
+    if (!serverId || typeof serverId !== "string") {
+      throw new Error("Missing serverId for import-existing-world.");
+    }
+
+    if (!loader || typeof loader !== "string") {
+      throw new Error("Missing loader for import-existing-world.");
+    }
+
+    if (!mcVersion || typeof mcVersion !== "string") {
+      throw new Error("Missing mcVersion for import-existing-world.");
+    }
+
+    if (!sourceWorldPath || typeof sourceWorldPath !== "string") {
+      throw new Error("Missing sourceWorldPath for import-existing-world.");
+    }
+
+    if (!extractPath || typeof extractPath !== "string") {
+      throw new Error("Missing extractPath for import-existing-world.");
+    }
+
+    const sourceStat = await fs.promises.stat(sourceWorldPath).catch(() => null);
+    if (!sourceStat || !sourceStat.isDirectory()) {
+      throw new Error("Selected world path is not a valid directory.");
+    }
+
+    const levelDatPath = path.join(sourceWorldPath, "level.dat");
+    if (!(await pathExists(levelDatPath))) {
+      throw new Error("Selected folder is not a valid Minecraft world (level.dat missing).");
+    }
+
+    await fs.promises.mkdir(extractPath, { recursive: true });
+
+    const runtimeResult = await (async () => {
+      switch (loader) {
+        case "vanilla":
+          return await prepareVanillaRuntime(mcVersion, extractPath);
+
+        case "paper":
+          return await preparePaperRuntime(mcVersion, extractPath);
+
+        case "purpur":
+          return { success: false, error: "Purpur runtime is not implemented yet." };
+
+        case "fabric":
+          return await prepareFabricRuntime(mcVersion, loaderVersion || "", extractPath);
+
+        case "forge":
+          return await prepareForgeRuntime(mcVersion, loaderVersion || "", extractPath);
+
+        case "neoforge":
+          return { success: false, error: "NeoForge runtime is not implemented yet." };
+
+        default:
+          return { success: false, error: `Unsupported loader: ${loader}` };
+      }
+    })();
+
+    if (!runtimeResult?.success) {
+      const runtimeError =
+        "error" in runtimeResult && typeof runtimeResult.error === "string"
+          ? runtimeResult.error
+          : "Failed to prepare runtime for imported world.";
+
+      throw new Error(runtimeError);
+    }
+
+    const worldTargetPath = path.join(extractPath, "world");
+    await ensureEmptyDir(worldTargetPath);
+    await copyDirectoryRecursive(sourceWorldPath, worldTargetPath);
+
+    await writeImportedServerProperties({
+      serverDir: extractPath,
+      levelName: "world",
+      port,
+    });
+
+    await fs.promises.writeFile(
+      path.join(extractPath, "eula.txt"),
+      "eula=true\n",
+      "utf8"
+    );
+
+    const serverRootId = await ensureDriveFolderPath({
+      accessToken,
+      serverId,
+      loader,
+    });
+
+    const drive = createDriveClient(accessToken);
+
+    const guaranteedFolders = ["mods", "config", "plugins"];
+    for (const folderName of guaranteedFolders) {
+      await getOrCreateChildFolderId(drive, serverRootId, folderName);
+    }
+
+    await backupServerV2({
+      serverPath: extractPath,
+      serverId,
+      accessToken,
+      driveBackupFolderId: serverRootId,
+      retention,
+    });
+
+    return {
+      success: true,
+      serverId,
+      extractPath,
+      importedWorldName: path.basename(sourceWorldPath),
+      loader,
+      mcVersion,
+    };
+  } catch (error) {
+    console.error("Failed to import existing world:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
+ipcMain.handle("import-existing-server", async (_event, args) => {
+  try {
+    const {
+      accessToken,
+      serverId,
+      loader,
+      mcVersion,
+      loaderVersion,
+      sourceServerPath,
+      extractPath,
+      serverSettingsOverride,
+      retention = 10,
+      port = 25565,
+    } = args ?? {};
+
+    if (!accessToken) {
+      throw new Error("Missing accessToken for import-existing-server.");
+    }
+
+    if (!serverId || typeof serverId !== "string") {
+      throw new Error("Missing serverId for import-existing-server.");
+    }
+
+    if (!loader || typeof loader !== "string") {
+      throw new Error("Missing loader for import-existing-server.");
+    }
+
+    if (!mcVersion || typeof mcVersion !== "string") {
+      throw new Error("Missing mcVersion for import-existing-server.");
+    }
+
+    if (!sourceServerPath || typeof sourceServerPath !== "string") {
+      throw new Error("Missing sourceServerPath for import-existing-server.");
+    }
+
+    if (!extractPath || typeof extractPath !== "string") {
+      throw new Error("Missing extractPath for import-existing-server.");
+    }
+
+    const sourceStat = await fs.promises.stat(sourceServerPath).catch(() => null);
+    if (!sourceStat || !sourceStat.isDirectory()) {
+      throw new Error("Selected server path is not a valid directory.");
+    }
+
+    await fs.promises.mkdir(extractPath, { recursive: true });
+
+    const runtimeResult = await (async () => {
+      switch (loader) {
+        case "vanilla":
+          return await prepareVanillaRuntime(mcVersion, extractPath);
+
+        case "paper":
+          return await preparePaperRuntime(mcVersion, extractPath);
+
+        case "purpur":
+          return { success: false, error: "Purpur runtime is not implemented yet." };
+
+        case "fabric":
+          return await prepareFabricRuntime(mcVersion, loaderVersion || "", extractPath);
+
+        case "forge":
+          return await prepareForgeRuntime(mcVersion, loaderVersion || "", extractPath);
+
+        case "neoforge":
+          return { success: false, error: "NeoForge runtime is not implemented yet." };
+
+        default:
+          return { success: false, error: `Unsupported loader: ${loader}` };
+      }
+    })();
+
+    if (!runtimeResult?.success) {
+      const runtimeError =
+        "error" in runtimeResult && typeof runtimeResult.error === "string"
+          ? runtimeResult.error
+          : "Failed to prepare runtime for imported server.";
+
+      throw new Error(runtimeError);
+    }
+
+    const sourceLevelName = await readImportedLevelName(sourceServerPath);
+
+    const worldCandidates = [
+      path.join(sourceServerPath, sourceLevelName),
+      path.join(sourceServerPath, "world"),
+    ];
+
+    let chosenWorldPath: string | null = null;
+
+    for (const candidate of worldCandidates) {
+      const stat = await fs.promises.stat(candidate).catch(() => null);
+      if (stat?.isDirectory() && (await pathExists(path.join(candidate, "level.dat")))) {
+        chosenWorldPath = candidate;
+        break;
+      }
+    }
+
+    if (!chosenWorldPath) {
+      throw new Error("Could not find a valid world folder inside the selected server.");
+    }
+
+    await ensureEmptyDir(path.join(extractPath, "world"));
+    await copyDirectoryRecursive(chosenWorldPath, path.join(extractPath, "world"));
+
+    const netherCandidates = [
+      path.join(sourceServerPath, `${sourceLevelName}_nether`),
+      path.join(sourceServerPath, "world_nether"),
+    ];
+
+    for (const candidate of netherCandidates) {
+      const copied = await copyOptionalFolderIfExists(candidate, path.join(extractPath, "world_nether"));
+      if (copied) break;
+    }
+
+    const endCandidates = [
+      path.join(sourceServerPath, `${sourceLevelName}_the_end`),
+      path.join(sourceServerPath, "world_the_end"),
+    ];
+
+    for (const candidate of endCandidates) {
+      const copied = await copyOptionalFolderIfExists(candidate, path.join(extractPath, "world_the_end"));
+      if (copied) break;
+    }
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "server.properties"),
+      path.join(extractPath, "server.properties")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "ops.json"),
+      path.join(extractPath, "ops.json")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "whitelist.json"),
+      path.join(extractPath, "whitelist.json")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "banned-ips.json"),
+      path.join(extractPath, "banned-ips.json")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "banned-players.json"),
+      path.join(extractPath, "banned-players.json")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "usercache.json"),
+      path.join(extractPath, "usercache.json")
+    );
+
+    const copiedEula = await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "eula.txt"),
+      path.join(extractPath, "eula.txt")
+    );
+
+    await copyOptionalFileIfExists(
+      path.join(sourceServerPath, "server-icon.png"),
+      path.join(extractPath, "server-icon.png")
+    );
+
+    await writeImportedServerProperties({
+      serverDir: extractPath,
+      levelName: "world",
+      port,
+    });
+
+    await applyServerSettingsOverride({
+      serverDir: extractPath,
+      serverSettingsOverride: {
+        ...serverSettingsOverride,
+        levelName: "world",
+      },
+      port,
+    });
+
+    if (!copiedEula) {
+      await fs.promises.writeFile(
+        path.join(extractPath, "eula.txt"),
+        "eula=true\n",
+        "utf8"
+      );
+    }
+
+    const serverRootId = await ensureDriveFolderPath({
+      accessToken,
+      serverId,
+      loader,
+    });
+
+    const drive = createDriveClient(accessToken);
+
+    const modsFolderId = await getOrCreateChildFolderId(drive, serverRootId, "mods");
+    const configFolderId = await getOrCreateChildFolderId(drive, serverRootId, "config");
+    const pluginsFolderId = await getOrCreateChildFolderId(drive, serverRootId, "plugins");
+
+    const copiedMods = await copyOptionalFolderIfExists(
+      path.join(sourceServerPath, "mods"),
+      path.join(extractPath, "mods")
+    );
+
+    const copiedConfig = await copyOptionalFolderIfExists(
+      path.join(sourceServerPath, "config"),
+      path.join(extractPath, "config")
+    );
+
+    const copiedPlugins = await copyOptionalFolderIfExists(
+      path.join(sourceServerPath, "plugins"),
+      path.join(extractPath, "plugins")
+    );
+
+    if (copiedMods) {
+      await uploadLocalFolderToDriveRecursive({
+        drive,
+        parentFolderId: modsFolderId,
+        localSourcePath: path.join(extractPath, "mods"),
+      });
+    }
+
+    if (copiedConfig) {
+      await uploadLocalFolderToDriveRecursive({
+        drive,
+        parentFolderId: configFolderId,
+        localSourcePath: path.join(extractPath, "config"),
+      });
+    }
+
+    if (copiedPlugins) {
+      await uploadLocalFolderToDriveRecursive({
+        drive,
+        parentFolderId: pluginsFolderId,
+        localSourcePath: path.join(extractPath, "plugins"),
+      });
+    }
+
+    await backupServerV2({
+      serverPath: extractPath,
+      serverId,
+      accessToken,
+      driveBackupFolderId: serverRootId,
+      retention,
+    });
+
+    return {
+      success: true,
+      serverId,
+      extractPath,
+      importedServerName: path.basename(sourceServerPath),
+      loader,
+      mcVersion,
+    };
+  } catch (error) {
+    console.error("Failed to import existing server:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 });
 
 ipcMain.handle("upload-mods-to-drive", async (_event, args) => {
@@ -515,14 +2193,14 @@ ipcMain.handle("download-mods-to-folder", async (_event, args) => {
         file.mimeType !== "application/vnd.google-apps.folder" &&
         file.name?.toLowerCase().endsWith(".jar")
     );
-
-    await runWithConcurrency(files, 4, async (file: any) => {
+    await runWithConcurrency(files, 3, async (file: any) => {
       const targetPath = path.join(localDestination, file.name!);
 
-      await downloadDriveFileToPath({
+      await downloadDriveFileToPathWithRetry({
         drive,
         fileId: file.id!,
         targetPath,
+        attempts: 3,
       });
     });
 
@@ -655,7 +2333,7 @@ ipcMain.handle("prepare-server-runtime", async (_event, args) => {
         return await prepareFabricRuntime(mcVersion, loaderVersion || "", extractPath);
 
       case "forge":
-        return { success: false, error: "Forge runtime is not implemented yet." };
+        return await prepareForgeRuntime(mcVersion, loaderVersion || "", extractPath);
 
       case "neoforge":
         return { success: false, error: "NeoForge runtime is not implemented yet." };
@@ -700,11 +2378,146 @@ ipcMain.handle("link-drive", async (_event, { uid, serverId }) => {
 (global as any).Request = Request;
 (global as any).Response = Response;
 
+
+
+type RestoreVerificationState =
+  | "idle"
+  | "queued"
+  | "running"
+  | "passed"
+  | "failed";
+
+type RestoreVerificationStatus = {
+  serverId: string;
+  state: RestoreVerificationState;
+  snapshotId: string | null;
+  message: string;
+  current: number;
+  total: number;
+  percent: number;
+  checkedFiles?: number;
+  verifiedFiles?: number;
+  missingFiles?: string[];
+  failedFiles?: Array<{
+    path: string;
+    reason: "size-mismatch" | "hash-mismatch";
+    expectedSize?: number;
+    actualSize?: number;
+    expectedHash?: string;
+    actualHash?: string;
+  }>;
+  startedAt?: number | null;
+  finishedAt?: number | null;
+};
+
+const restoreVerificationByServer = new Map<string, RestoreVerificationStatus>();
+const restoreVerificationJobs = new Map<string, Promise<void>>();
+
+
 let mainWindow: BrowserWindow | null = null;
 
+
 const consoleWindows = new Map<string, BrowserWindow>();
+const liveAdminWindows = new Map<string, BrowserWindow>();
+
 let metricsWindow: BrowserWindow | null = null;
 let ownerWindow: BrowserWindow | null = null;
+const onlinePlayersByServer = new Map<string, string[]>();
+
+function getOnlinePlayersSnapshot(serverId: string): string[] {
+  return [...(onlinePlayersByServer.get(serverId) ?? [])];
+}
+
+function setOnlinePlayersForServer(serverId: string, players: string[]) {
+  const unique = Array.from(new Set(players.map((p) => p.trim()).filter(Boolean)));
+  onlinePlayersByServer.set(serverId, unique);
+
+  const payload = {
+    serverId,
+    players: unique,
+    count: unique.length,
+  };
+
+  const liveAdminWin = liveAdminWindows.get(serverId);
+  if (liveAdminWin && !liveAdminWin.isDestroyed()) {
+    liveAdminWin.webContents.send("online-players-changed", payload);
+  }
+
+  const consoleWin = consoleWindows.get(serverId);
+  if (consoleWin && !consoleWin.isDestroyed()) {
+    consoleWin.webContents.send("online-players-changed", payload);
+  }
+}
+
+function addOnlinePlayer(serverId: string, playerName: string) {
+  const current = getOnlinePlayersSnapshot(serverId);
+  if (!current.includes(playerName)) {
+    current.push(playerName);
+    setOnlinePlayersForServer(serverId, current);
+  }
+}
+
+function removeOnlinePlayer(serverId: string, playerName: string) {
+  const current = getOnlinePlayersSnapshot(serverId).filter((p) => p !== playerName);
+  setOnlinePlayersForServer(serverId, current);
+}
+
+function clearOnlinePlayers(serverId: string) {
+  setOnlinePlayersForServer(serverId, []);
+}
+
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getUtilityWindowBounds(
+  anchorWindow: BrowserWindow | null,
+  options: {
+    width: number;
+    height: number;
+    gap?: number;
+  }
+) {
+  const { width, height, gap = 14 } = options;
+
+  if (!anchorWindow || anchorWindow.isDestroyed()) {
+    const display = screen.getPrimaryDisplay().workArea;
+    return {
+      x: Math.round(display.x + (display.width - width) / 2),
+      y: Math.round(display.y + (display.height - height) / 2),
+      width,
+      height,
+    };
+  }
+
+  const anchorBounds = anchorWindow.getBounds();
+  const workArea = screen.getDisplayMatching(anchorBounds).workArea;
+
+  const rightX = anchorBounds.x + anchorBounds.width + gap;
+  const leftX = anchorBounds.x - width - gap;
+
+  const fitsRight = rightX + width <= workArea.x + workArea.width;
+  const fitsLeft = leftX >= workArea.x;
+
+  const x = fitsRight
+    ? rightX
+    : fitsLeft
+      ? leftX
+      : clamp(
+        anchorBounds.x + anchorBounds.width - width,
+        workArea.x,
+        workArea.x + workArea.width - width
+      );
+
+  const y = clamp(
+    anchorBounds.y + Math.round((anchorBounds.height - height) / 2),
+    workArea.y,
+    workArea.y + workArea.height - height
+  );
+
+  return { x, y, width, height };
+}
 
 function sendToRelevantWindows(channel: string, payload: any, serverId?: string) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -727,6 +2540,12 @@ function sendToRelevantWindows(channel: string, payload: any, serverId?: string)
   if (metricsWindow && !metricsWindow.isDestroyed()) {
     metricsWindow.webContents.send(channel, payload);
   }
+}
+
+function emitRestoreVerificationStatus(serverId: string) {
+  const status = restoreVerificationByServer.get(serverId);
+  if (!status) return;
+  sendToRelevantWindows("restore-verification-progress", status, serverId);
 }
 
 function getRendererUrl(hashPath: string) {
@@ -782,7 +2601,7 @@ async function downloadFileFromDrive(driveZipId: string, destPath: string, acces
   const drive = createDriveClient(accessToken);
 
   const dest = fs.createWriteStream(destPath);
-  
+
 
   await new Promise<void>((resolve, reject) => {
     drive.files.get(
@@ -793,10 +2612,10 @@ async function downloadFileFromDrive(driveZipId: string, destPath: string, acces
           reject(err);
           return;
         }
-	    if (!res || !res.data) {
-	      reject(new Error("No response data from Google Drive"));
-	      return;
-	    }
+        if (!res || !res.data) {
+          reject(new Error("No response data from Google Drive"));
+          return;
+        }
         res.data
           .on("end", () => resolve())
           .on("error", (err) => reject(err))
@@ -805,6 +2624,65 @@ async function downloadFileFromDrive(driveZipId: string, destPath: string, acces
     );
   });
 }
+
+ipcMain.handle(
+  "open-server-live-admin",
+  async (_e, { serverId, accessToken }: { serverId: string; accessToken: string }) => {
+    const existing = liveAdminWindows.get(serverId);
+
+    if (existing && !existing.isDestroyed()) {
+      existing.show();
+      existing.focus();
+      return { success: true };
+    }
+
+    const preloadPath = !app.isPackaged
+      ? path.join(__dirname, "preload.js")
+      : path.join(process.resourcesPath, "app.asar.unpacked", "dist-electron", "preload.js");
+
+    const relatedConsole = consoleWindows.get(serverId) ?? null;
+
+    const bounds = getUtilityWindowBounds(relatedConsole, {
+      width: 470,
+      height: 620,
+      gap: 14,
+    });
+
+    const liveAdminWindow = new BrowserWindow({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      minWidth: 400,
+      minHeight: 460,
+      maxWidth: 620,
+      autoHideMenuBar: true,
+      backgroundColor: "#0b0b0b",
+      title: `Live Admin - ${serverId}`,
+      resizable: true,
+      useContentSize: true,
+      webPreferences: {
+        preload: preloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+
+    liveAdminWindows.set(serverId, liveAdminWindow);
+
+    liveAdminWindow.on("closed", () => {
+      liveAdminWindows.delete(serverId);
+    });
+
+    const params = new URLSearchParams();
+    params.set("serverId", serverId);
+    params.set("accessToken", accessToken);
+
+    await liveAdminWindow.loadURL(getRendererUrl(`/live-admin?${params.toString()}`));
+
+    return { success: true };
+  }
+);
 
 ipcMain.handle("start-google-oauth", async () => {
   return new Promise((resolve, reject) => {
@@ -971,6 +2849,144 @@ ipcMain.handle("get-drive-storage-info", async (_event, { accessToken }) => {
   }
 });
 
+ipcMain.handle(
+  "start-restore-verification",
+  async (_event, { snapshotId, serverPath, serverId, loader, accessToken }) => {
+    try {
+      const existingJob = restoreVerificationJobs.get(serverId);
+      if (existingJob) {
+        return { success: true, alreadyRunning: true };
+      }
+
+      const queuedStatus: RestoreVerificationStatus = {
+        serverId,
+        state: "queued",
+        snapshotId,
+        message: "Restore check queued",
+        current: 0,
+        total: 1,
+        percent: 0,
+        startedAt: Date.now(),
+        finishedAt: null,
+      };
+
+      restoreVerificationByServer.set(serverId, queuedStatus);
+      emitRestoreVerificationStatus(serverId);
+
+      const job = (async () => {
+        try {
+          const drive = createDriveClient(accessToken);
+
+          const serverRootId = await ensureDriveFolderPath({
+            accessToken,
+            serverId,
+            loader,
+          });
+
+          const backupStore = await findChildFolderByName(drive, serverRootId, "backup-store");
+          if (!backupStore) throw new Error("backup-store missing");
+
+          const snapshotsFolder = await findChildFolderByName(drive, backupStore.id, "snapshots");
+          if (!snapshotsFolder) throw new Error("snapshots folder missing");
+
+          restoreVerificationByServer.set(serverId, {
+            ...queuedStatus,
+            state: "running",
+            message: "Restore check running",
+            current: 0,
+            total: 1,
+            percent: 0,
+          });
+          emitRestoreVerificationStatus(serverId);
+
+          const result = await verifySnapshotRestoreV2({
+            drive,
+            snapshotFolderId: snapshotId,
+            serverPath,
+            accessToken,
+            onProgress: (progress) => {
+              const prev = restoreVerificationByServer.get(serverId) ?? queuedStatus;
+              restoreVerificationByServer.set(serverId, {
+                ...prev,
+                state: "running",
+                message: progress.message,
+                current: progress.current,
+                total: progress.total,
+                percent: progress.percent,
+              });
+              emitRestoreVerificationStatus(serverId);
+            },
+          });
+
+          const passed =
+            result.missingFiles.length === 0 &&
+            result.failedFiles.length === 0;
+
+          restoreVerificationByServer.set(serverId, {
+            serverId,
+            state: passed ? "passed" : "failed",
+            snapshotId,
+            message: passed
+              ? "Restore check passed"
+              : "Restore check found issues",
+            current: result.checkedFiles,
+            total: result.checkedFiles,
+            percent: 100,
+            checkedFiles: result.checkedFiles,
+            verifiedFiles: result.verifiedFiles,
+            missingFiles: result.missingFiles,
+            failedFiles: result.failedFiles,
+            startedAt: queuedStatus.startedAt,
+            finishedAt: Date.now(),
+          });
+          emitRestoreVerificationStatus(serverId);
+        } catch (err: any) {
+          restoreVerificationByServer.set(serverId, {
+            serverId,
+            state: "failed",
+            snapshotId,
+            message: err?.message || String(err),
+            current: 0,
+            total: 1,
+            percent: 0,
+            missingFiles: [],
+            failedFiles: [],
+            startedAt: queuedStatus.startedAt,
+            finishedAt: Date.now(),
+          });
+          emitRestoreVerificationStatus(serverId);
+        } finally {
+          restoreVerificationJobs.delete(serverId);
+        }
+      })();
+
+      restoreVerificationJobs.set(serverId, job);
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) };
+    }
+  }
+);
+
+ipcMain.handle("get-restore-verification-status", async (_event, { serverId }) => {
+  return {
+    success: true,
+    status:
+      restoreVerificationByServer.get(serverId) ?? {
+        serverId,
+        state: "idle",
+        snapshotId: null,
+        message: "No restore check running",
+        current: 0,
+        total: 0,
+        percent: 0,
+        startedAt: null,
+        finishedAt: null,
+      },
+  };
+});
+
 ipcMain.handle("get-server-drive-usage", async (_event, { accessToken, serverId, loader }) => {
   try {
     const drive = createDriveClient(accessToken);
@@ -1016,6 +3032,126 @@ ipcMain.handle("get-server-drive-usage", async (_event, { accessToken, serverId,
       success: false,
       error: error instanceof Error ? error.message : String(error),
       usage: 0,
+    };
+  }
+});
+
+async function detectPreparedServerRuntime(args: {
+  loader: string;
+  extractPath: string;
+}): Promise<{
+  success: boolean;
+  ready: boolean;
+  launchMode?: "jar" | "forge-args";
+  launcherJar?: string | null;
+  userJvmArgsPath?: string | null;
+  winArgsPath?: string | null;
+  unixArgsPath?: string | null;
+  error?: string;
+}> {
+  try {
+    const { loader, extractPath } = args;
+
+    if (!loader || !extractPath) {
+      throw new Error("Missing loader or extractPath.");
+    }
+
+    if (loader === "forge") {
+      const detected = await detectForgeLaunch(extractPath);
+
+      if (!detected) {
+        return { success: true, ready: false };
+      }
+
+      if (detected.mode === "jar") {
+        return {
+          success: true,
+          ready: true,
+          launchMode: "jar",
+          launcherJar: detected.jarPath,
+        };
+      }
+
+      return {
+        success: true,
+        ready: true,
+        launchMode: "forge-args",
+        userJvmArgsPath: detected.userJvmArgsPath,
+        winArgsPath: detected.winArgsPath ?? null,
+        unixArgsPath: detected.unixArgsPath ?? null,
+      };
+    }
+
+    const jarPath = path.join(extractPath, "server.jar");
+    const exists = await fileExists(jarPath);
+
+    return {
+      success: true,
+      ready: exists,
+      launchMode: "jar",
+      launcherJar: exists ? jarPath : null,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      ready: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+ipcMain.handle("detect-prepared-server-runtime", async (_event, args) => {
+  return await detectPreparedServerRuntime(args);
+});
+
+ipcMain.handle("check-server-runtime", async (_event, args) => {
+  try {
+    const { loader, extractPath } = args ?? {};
+
+    if (!loader || !extractPath) {
+      throw new Error("Missing loader or extractPath.");
+    }
+
+    if (loader === "forge") {
+      const detected = await detectForgeLaunch(extractPath);
+
+      if (!detected) {
+        return { success: true, ready: false };
+      }
+
+      if (detected.mode === "jar") {
+        return {
+          success: true,
+          ready: true,
+          launchMode: "jar" as const,
+          launcherJar: detected.jarPath,
+        };
+      }
+
+      return {
+        success: true,
+        ready: true,
+        launchMode: "forge-args" as const,
+        userJvmArgsPath: detected.userJvmArgsPath,
+        winArgsPath: detected.winArgsPath ?? null,
+        unixArgsPath: detected.unixArgsPath ?? null,
+      };
+    }
+
+    const serverJarPath = path.join(extractPath, "server.jar");
+    const exists = await fileExists(serverJarPath);
+
+    return {
+      success: true,
+      ready: exists,
+      launchMode: "jar" as const,
+      launcherJar: exists ? serverJarPath : null,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      ready: false,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 });
@@ -1117,7 +3253,6 @@ ipcMain.handle(
   "restore-snapshot",
   async (_event, { snapshotId, serverPath, serverId, loader, accessToken }) => {
     try {
-
       const drive = createDriveClient(accessToken)
 
       const serverRootId = await ensureDriveFolderPath({
@@ -1132,40 +3267,91 @@ ipcMain.handle(
       const snapshotsFolder = await findChildFolderByName(drive, backupStore.id, "snapshots")
       if (!snapshotsFolder) throw new Error("snapshots folder missing")
 
-const structure = await ensureBackupStructure({
-  accessToken,
-  serverRootFolderId: serverRootId
-})
+      mainWindow?.webContents.send("restore-progress", {
+        phase: "starting",
+        message: "Preparing restore",
+        current: 0,
+        total: 1,
+        percent: 0,
+      })
 
-await restoreSnapshotV2({
-  drive,
-  snapshotFolderId: snapshotId,
-  serverPath,
-  accessToken,
-  structure
-})
+      const result = await restoreSnapshotV2({
+        drive,
+        snapshotFolderId: snapshotId,
+        serverPath,
+        accessToken,
+        onProgress: (progress) => {
+          mainWindow?.webContents.send("restore-progress", progress)
+        }
+      })
 
-      return { success: true }
+      mainWindow?.webContents.send("restore-progress", {
+        phase: "done",
+        message: "Restore completed",
+        current: 1,
+        total: 1,
+        percent: 100,
+      })
 
-    } catch (err:any) {
-
+      return result
+    } catch (err: any) {
       console.error("Snapshot restore failed:", err)
 
-      return {
-        success:false,
-        error:err.message
-      }
+      mainWindow?.webContents.send("restore-progress", {
+        phase: "error",
+        message: err?.message || String(err),
+        current: 0,
+        total: 1,
+        percent: 0,
+      })
 
+      return {
+        success: false,
+        error: err.message
+      }
     }
   }
 )
+
 ipcMain.handle("get-valid-access-token", async (_e, args) => {
+  const { userId, driveId } = args;
+  const key = getAccessTokenCacheKey(userId, driveId);
+  const now = Date.now();
+
+  const cached = accessTokenCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.token;
+  }
+
   console.log("🔥 get-valid-access-token CALLED", args);
-  return await getValidAccessToken(args.userId, args.driveId);
+
+  const token = await getValidAccessToken(userId, driveId);
+
+  accessTokenCache.set(key, {
+    token,
+    expiresAt: now + 50 * 60 * 1000, // 50 perc
+  });
+
+  return token;
 });
 
-ipcMain.handle("getValidAccessToken", async (event, createdBy, linkedDriveId) => {
-  return await getValidAccessToken(createdBy, linkedDriveId);
+ipcMain.handle("getValidAccessToken", async (_event, createdBy, linkedDriveId) => {
+  const key = getAccessTokenCacheKey(createdBy, linkedDriveId);
+  const now = Date.now();
+
+  const cached = accessTokenCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.token;
+  }
+
+  const token = await getValidAccessToken(createdBy, linkedDriveId);
+
+  accessTokenCache.set(key, {
+    token,
+    expiresAt: now + 50 * 60 * 1000,
+  });
+
+  return token;
 });
 
 
@@ -1268,6 +3454,7 @@ ipcMain.handle(
       ram,
       mcVersion,
       isAdmin,
+      accessToken,
     }: {
       serverId: string;
       role?: string;
@@ -1275,6 +3462,7 @@ ipcMain.handle(
       ram?: string | null;
       mcVersion?: string | null;
       isAdmin?: boolean;
+      accessToken?: string | null;
     }
   ) => {
     const existing = consoleWindows.get(serverId);
@@ -1315,6 +3503,7 @@ ipcMain.handle(
     if (ram) params.set("ram", ram);
     if (mcVersion) params.set("mcVersion", mcVersion);
     if (typeof isAdmin === "boolean") params.set("isAdmin", String(isAdmin));
+    if (accessToken) params.set("accessToken", accessToken);
 
     const query = params.toString();
     const hashPath = `/console/${serverId}/${role ?? "admin"}${query ? `?${query}` : ""}`;
@@ -1549,7 +3738,12 @@ type ServerRuntimeState =
 type RunningServer = {
   serverId: string;
   proc: ChildProcessWithoutNullStreams;
-  pathToServerJar: string;
+  pathToServerJar?: string | null;
+  launchMode: "jar" | "forge-args";
+  serverFolder: string;
+  forgeUserJvmArgsPath?: string | null;
+  forgeWinArgsPath?: string | null;
+  forgeUnixArgsPath?: string | null;
   ram: string;
   startedAt: number;
   port: number;
@@ -1852,7 +4046,12 @@ async function closeUpnpForServer(serverId: string, port: number) {
 
 type LaunchServerProcessArgs = {
   serverId: string;
-  pathToServerJar: string;
+  pathToServerJar?: string | null;
+  launchMode?: "jar" | "forge-args";
+  forgeUserJvmArgsPath?: string | null;
+  forgeWinArgsPath?: string | null;
+  forgeUnixArgsPath?: string | null;
+  serverFolder?: string | null;
   ram: string;
   preferredPort?: number;
   restartOnCrash?: boolean;
@@ -1877,7 +4076,12 @@ function handleServerReadyFromLog(serverId: string, log: string) {
 
 async function scheduleAutoRestart(args: {
   serverId: string;
-  pathToServerJar: string;
+  pathToServerJar?: string | null;
+  launchMode?: "jar" | "forge-args";
+  forgeUserJvmArgsPath?: string | null;
+  forgeWinArgsPath?: string | null;
+  forgeUnixArgsPath?: string | null;
+  serverFolder?: string | null;
   ram: string;
   preferredPort?: number;
   restartOnCrash?: boolean;
@@ -1899,7 +4103,12 @@ async function scheduleAutoRestart(args: {
     try {
       await launchServerProcess({
         serverId: args.serverId,
-        pathToServerJar: args.pathToServerJar,
+        pathToServerJar: args.pathToServerJar ?? null,
+        launchMode: args.launchMode ?? "jar",
+        forgeUserJvmArgsPath: args.forgeUserJvmArgsPath ?? null,
+        forgeWinArgsPath: args.forgeWinArgsPath ?? null,
+        forgeUnixArgsPath: args.forgeUnixArgsPath ?? null,
+        serverFolder: args.serverFolder ?? null,
         ram: args.ram,
         preferredPort: args.preferredPort,
         restartOnCrash: args.restartOnCrash,
@@ -1916,9 +4125,19 @@ async function scheduleAutoRestart(args: {
   }, args.restartDelayMs);
 }
 
+async function writeForgeUserJvmArgsFile(userJvmArgsPath: string, ram: string): Promise<void> {
+  const content = `-Xms${ram}\n-Xmx${ram}\n`;
+  await fs.promises.writeFile(userJvmArgsPath, content, "utf8");
+}
+
 async function launchServerProcess({
   serverId,
   pathToServerJar,
+  launchMode = "jar",
+  forgeUserJvmArgsPath,
+  forgeWinArgsPath,
+  forgeUnixArgsPath,
+  serverFolder,
   ram,
   preferredPort,
   restartOnCrash = true,
@@ -1940,16 +4159,23 @@ async function launchServerProcess({
     };
   }
 
-const chosenPort =
-  typeof preferredPort === "number" && preferredPort > 0
-    ? (await isPortFree(preferredPort))
-      ? preferredPort
-      : await findFreePort(25565, 25650)
-    : await findFreePort(25565, 25650);
+  const chosenPort =
+    typeof preferredPort === "number" && preferredPort > 0
+      ? (await isPortFree(preferredPort))
+        ? preferredPort
+        : await findFreePort(25565, 25650)
+      : await findFreePort(25565, 25650);
 
-  const serverFolder = path.dirname(pathToServerJar);
+  const resolvedServerFolder =
+    serverFolder ||
+    (pathToServerJar ? path.dirname(pathToServerJar) : null) ||
+    (forgeUserJvmArgsPath ? path.dirname(forgeUserJvmArgsPath) : null);
 
-  const writePropsResult = await writeServerPropertiesFile(serverFolder, {
+  if (!resolvedServerFolder) {
+    return { success: false, error: "Missing server folder for launch." };
+  }
+
+  const writePropsResult = await writeServerPropertiesFile(resolvedServerFolder, {
     "server-port": String(chosenPort),
   });
 
@@ -1960,21 +4186,62 @@ const chosenPort =
     };
   }
 
-  const args = [
-    `-Xmx${ram}`,
-    `-Xms${ram}`,
-    "-jar",
-    pathToServerJar,
-    "nogui",
-  ];
+  const javaExec = resolveJavaExecutable();
+  let args: string[] = [];
 
-  const proc = spawn("java", args, {
-    cwd: serverFolder,
+  if (launchMode === "forge-args") {
+    if (!forgeUserJvmArgsPath) {
+      return { success: false, error: "Missing Forge user_jvm_args.txt path." };
+    }
+
+    const argsFile =
+      process.platform === "win32"
+        ? forgeWinArgsPath
+        : (forgeUnixArgsPath || forgeWinArgsPath);
+
+    if (!argsFile) {
+      return { success: false, error: "Missing Forge args file." };
+    }
+
+    await writeForgeUserJvmArgsFile(forgeUserJvmArgsPath, ram);
+
+    const relUserJvmArgs = path.relative(resolvedServerFolder, forgeUserJvmArgsPath).replace(/\\/g, "/");
+    const relArgsFile = path.relative(resolvedServerFolder, argsFile).replace(/\\/g, "/");
+
+    args = [`@${relUserJvmArgs}`, `@${relArgsFile}`, "nogui"];
+  } else {
+    if (!pathToServerJar) {
+      return { success: false, error: "Missing server jar path." };
+    }
+
+    args = [
+      `-Xmx${ram}`,
+      `-Xms${ram}`,
+      "-jar",
+      pathToServerJar,
+      "nogui",
+    ];
+  }
+
+  console.log("[DEBUG] Using Java executable:", javaExec);
+  console.log("[DEBUG] Launch mode:", launchMode);
+  console.log("[DEBUG] Launch cwd:", resolvedServerFolder);
+  console.log("[DEBUG] Launch args:", args);
+
+  const proc = spawn(javaExec, args, {
+    cwd: resolvedServerFolder,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
   proc.stdout.on("data", (data: Buffer) => {
     const log = data.toString();
+
+    const joinedMatch = log.match(/\]: ([^[]+?) joined the game/);
+    if (joinedMatch?.[1]) addOnlinePlayer(serverId, joinedMatch[1].trim());
+
+    const leftMatch = log.match(/\]: ([^[]+?) left the game/);
+    if (leftMatch?.[1]) removeOnlinePlayer(serverId, leftMatch[1].trim());
+
     appendServerLog(serverId, log);
     handleServerReadyFromLog(serverId, log);
     sendToRelevantWindows("server-log", { serverId, log }, serverId);
@@ -1982,6 +4249,13 @@ const chosenPort =
 
   proc.stderr.on("data", (data: Buffer) => {
     const log = data.toString();
+
+    const joinedMatch = log.match(/\]: ([^[]+?) joined the game/);
+    if (joinedMatch?.[1]) addOnlinePlayer(serverId, joinedMatch[1].trim());
+
+    const leftMatch = log.match(/\]: ([^[]+?) left the game/);
+    if (leftMatch?.[1]) removeOnlinePlayer(serverId, leftMatch[1].trim());
+
     appendServerLog(serverId, log);
     handleServerReadyFromLog(serverId, log);
     sendToRelevantWindows("server-log", { serverId, log }, serverId);
@@ -2011,23 +4285,28 @@ const chosenPort =
 
     const restartConfig = current
       ? {
-          serverId: current.serverId,
-          pathToServerJar: current.pathToServerJar,
-          ram: current.ram,
-          preferredPort: current.port,
-          restartOnCrash: current.restartOnCrash,
-          restartAttempts: current.restartAttempts + 1,
-          maxRestartAttempts: current.maxRestartAttempts,
-          restartDelayMs: current.restartDelayMs,
-        }
+        serverId: current.serverId,
+        pathToServerJar: current.pathToServerJar ?? null,
+        launchMode: current.launchMode,
+        forgeUserJvmArgsPath: current.forgeUserJvmArgsPath ?? null,
+        forgeWinArgsPath: current.forgeWinArgsPath ?? null,
+        forgeUnixArgsPath: current.forgeUnixArgsPath ?? null,
+        serverFolder: current.serverFolder,
+        ram: current.ram,
+        preferredPort: current.port,
+        restartOnCrash: current.restartOnCrash,
+        restartAttempts: current.restartAttempts + 1,
+        maxRestartAttempts: current.maxRestartAttempts,
+        restartDelayMs: current.restartDelayMs,
+      }
       : null;
 
-if (current) {
-  current.state = finalState;
-  if (current.upnpStatus === "mapped") {
-    current.upnpStatus = "closing";
-  }
-}
+    if (current) {
+      current.state = finalState;
+      if (current.upnpStatus === "mapped") {
+        current.upnpStatus = "closing";
+      }
+    }
 
     emitServerState(serverId);
 
@@ -2042,22 +4321,29 @@ if (current) {
       serverId
     );
 
-if (current?.port && current.upnpStatus === "mapped") {
-  void closeUpnpForServer(serverId, current.port);
-}
+    if (current?.port && current.upnpStatus === "mapped") {
+      void closeUpnpForServer(serverId, current.port);
+    }
 
+    clearOnlinePlayers(serverId);
     runningServers.delete(serverId);
-
 
     if (shouldRestart && restartConfig) {
       void scheduleAutoRestart(restartConfig);
     }
   });
 
+  clearOnlinePlayers(serverId);
+
   runningServers.set(serverId, {
     serverId,
     proc,
-    pathToServerJar,
+    pathToServerJar: pathToServerJar ?? null,
+    launchMode,
+    serverFolder: resolvedServerFolder,
+    forgeUserJvmArgsPath: forgeUserJvmArgsPath ?? null,
+    forgeWinArgsPath: forgeWinArgsPath ?? null,
+    forgeUnixArgsPath: forgeUnixArgsPath ?? null,
     ram,
     startedAt: Date.now(),
     port: chosenPort,
@@ -2071,7 +4357,7 @@ if (current?.port && current.upnpStatus === "mapped") {
     upnpStatus: "idle",
     upnpError: null,
   });
-  
+
   emitServerState(serverId);
   void openUpnpForServer(serverId);
 
@@ -2082,7 +4368,6 @@ if (current?.port && current.upnpStatus === "mapped") {
 
   appendServerLog(serverId, launchLog);
   sendToRelevantWindows("server-log", { serverId, log: launchLog }, serverId);
-
 
   return { success: true, port: chosenPort };
 }
@@ -2097,22 +4382,26 @@ ipcMain.handle("getRunningServerInfo", async (_event, { serverId }: { serverId: 
     };
   }
 
-return {
-  success: true,
-  running: true,
-  data: {
-    serverId: running.serverId,
-    extractPath: path.dirname(running.pathToServerJar),
-    pathToServerJar: running.pathToServerJar,
-    ram: running.ram,
-    port: running.port,
-    startedAt: running.startedAt,
-    pid: running.proc.pid ?? null,
-    state: running.state,
-    upnpStatus: running.upnpStatus ?? "idle",
-    upnpError: running.upnpError ?? null,
-  },
-};
+  return {
+    success: true,
+    running: true,
+    data: {
+      serverId: running.serverId,
+      extractPath: running.serverFolder,
+      pathToServerJar: running.pathToServerJar ?? null,
+      launchMode: running.launchMode,
+      forgeUserJvmArgsPath: running.forgeUserJvmArgsPath ?? null,
+      forgeWinArgsPath: running.forgeWinArgsPath ?? null,
+      forgeUnixArgsPath: running.forgeUnixArgsPath ?? null,
+      ram: running.ram,
+      port: running.port,
+      startedAt: running.startedAt,
+      pid: running.proc.pid ?? null,
+      state: running.state,
+      upnpStatus: running.upnpStatus ?? "idle",
+      upnpError: running.upnpError ?? null,
+    },
+  };
 });
 
 ipcMain.handle(
@@ -2134,11 +4423,21 @@ ipcMain.handle(
     {
       serverId,
       pathToServerJar,
+      launchMode,
+      forgeUserJvmArgsPath,
+      forgeWinArgsPath,
+      forgeUnixArgsPath,
+      serverFolder,
       ram,
       preferredPort,
     }: {
       serverId: string;
-      pathToServerJar: string;
+      pathToServerJar?: string | null;
+      launchMode?: "jar" | "forge-args";
+      forgeUserJvmArgsPath?: string | null;
+      forgeWinArgsPath?: string | null;
+      forgeUnixArgsPath?: string | null;
+      serverFolder?: string | null;
       ram: string;
       preferredPort?: number;
     }
@@ -2146,7 +4445,12 @@ ipcMain.handle(
     try {
       return await launchServerProcess({
         serverId,
-        pathToServerJar,
+        pathToServerJar: pathToServerJar ?? null,
+        launchMode: launchMode ?? "jar",
+        forgeUserJvmArgsPath: forgeUserJvmArgsPath ?? null,
+        forgeWinArgsPath: forgeWinArgsPath ?? null,
+        forgeUnixArgsPath: forgeUnixArgsPath ?? null,
+        serverFolder: serverFolder ?? null,
         ram,
         preferredPort,
         restartOnCrash: true,
@@ -2235,6 +4539,69 @@ ipcMain.handle(
 
     proc.stdin.write(command + "\n");
     return { success: true };
+  }
+);
+
+ipcMain.handle(
+  "get-online-players",
+  async (_event, { serverId }: { serverId: string }) => {
+    return {
+      success: true,
+      players: getOnlinePlayersSnapshot(serverId),
+    };
+  }
+);
+
+ipcMain.handle(
+  "timeout-players",
+  async (
+    _event,
+    {
+      serverId,
+      players,
+      minutes,
+      reason,
+    }: {
+      serverId: string;
+      players: string[];
+      minutes: number;
+      reason?: string;
+    }
+  ) => {
+    try {
+      const server = runningServers.get(serverId);
+
+      if (!server || !server.proc || server.proc.killed) {
+        return { success: false, error: "Server is not running." };
+      }
+
+      const safePlayers = players.map((p) => p.trim()).filter(Boolean);
+      if (!safePlayers.length) {
+        return { success: false, error: "No players to timeout." };
+      }
+
+      const safeMinutes = Math.max(1, Math.floor(minutes || 1));
+      const timeoutReason =
+        reason?.trim() || `Temporary timeout (${safeMinutes} min)`;
+
+      for (const player of safePlayers) {
+        server.proc.stdin.write(`ban ${player} ${timeoutReason}\n`);
+
+        setTimeout(() => {
+          const current = runningServers.get(serverId);
+          if (!current || !current.proc || current.proc.killed) return;
+
+          current.proc.stdin.write(`pardon ${player}\n`);
+        }, safeMinutes * 60 * 1000);
+      }
+
+      return { success: true };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error?.message || "Failed to timeout players.",
+      };
+    }
   }
 );
 

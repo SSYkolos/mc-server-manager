@@ -22,76 +22,146 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 
 
-selectModFiles: () => ipcRenderer.invoke("select-mod-files"),
+  selectModFiles: () => ipcRenderer.invoke("select-mod-files"),
 
-uploadModsToDrive: (args: {
-  accessToken: string;
-  serverId: string;
-  loader: string;
-  filePaths: string[];
-}) => ipcRenderer.invoke("upload-mods-to-drive", args),
+  onRestoreProgress: (callback: (data: any) => void) => {
+    const listener = (_: any, data: any) => callback(data);
+    ipcRenderer.on("restore-progress", listener);
 
-getServerOwnerSettings: (args: { serverId: string }) =>
-  ipcRenderer.invoke("get-server-owner-settings", args),
+    return () => {
+      ipcRenderer.removeListener("restore-progress", listener);
+    };
+  },
 
-setServerBackupRetention: (args: {
-  serverId: string;
-  backupRetentionCount: number;
-}) =>
-  ipcRenderer.invoke("set-server-backup-retention", args),
+  readImportableServerProperties: (args: { sourceServerPath: string }) =>
+    ipcRenderer.invoke("read-importable-server-properties", args),
 
-getDriveStorageInfo: (args: { accessToken: string }) =>
-  ipcRenderer.invoke("get-drive-storage-info", args),
+  importExistingServer: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    mcVersion: string;
+    loaderVersion?: string;
+    sourceServerPath: string;
+    extractPath: string;
+    serverSettingsOverride?: Record<string, any>;
+    retention?: number;
+    port?: number;
+  }) => ipcRenderer.invoke("import-existing-server", args),
 
-listServerInvites: (args: { serverId: string }) =>
-  ipcRenderer.invoke("list-server-invites", args),
+  searchMods: (args: {
+    provider: "modrinth" | "curseforge";
+    query: string;
+    loader: string;
+    mcVersion: string;
+  }) => ipcRenderer.invoke("search-mods", args),
 
-deleteServerInvite: (args: { inviteId: string }) =>
-  ipcRenderer.invoke("delete-server-invite", args),
+
+  previewModInstall: (args: {
+    provider: "modrinth" | "curseforge";
+    projectId: string;
+    loader: string;
+    mcVersion: string;
+    installedProjectIds?: string[];
+  }) => ipcRenderer.invoke("preview-mod-install", args),
+
+  installDiscoveredMod: (args: {
+    provider: "modrinth" | "curseforge";
+    projectId: string;
+    serverId: string;
+    loader: string;
+    mcVersion: string;
+    accessToken: string;
+    installedProjectIds?: string[];
+    installDependencyProjectIds?: string[];
+    replaceExistingProjectIds?: string[];
+  }) => ipcRenderer.invoke("install-discovered-mod", args),
+
+  uploadModsToDrive: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    filePaths: string[];
+  }) => ipcRenderer.invoke("upload-mods-to-drive", args),
+
+  getServerOwnerSettings: (args: { serverId: string }) =>
+    ipcRenderer.invoke("get-server-owner-settings", args),
+
+  setServerBackupRetention: (args: {
+    serverId: string;
+    backupRetentionCount: number;
+  }) =>
+    ipcRenderer.invoke("set-server-backup-retention", args),
+
+  getDriveStorageInfo: (args: { accessToken: string }) =>
+    ipcRenderer.invoke("get-drive-storage-info", args),
+
+  listServerInvites: (args: { serverId: string }) =>
+    ipcRenderer.invoke("list-server-invites", args),
+
+  deleteServerInvite: (args: { inviteId: string }) =>
+    ipcRenderer.invoke("delete-server-invite", args),
 
 
-listDriveFolderFiles: (args: {
-  accessToken: string;
-  serverId: string;
-  loader: string;
-  folderName: "mods" | "mods-disabled" | "config" | "plugins";
-}) => ipcRenderer.invoke("list-drive-folder-files", args),
+  listDriveFolderFiles: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    folderName: "mods" | "mods-disabled" | "config" | "plugins";
+  }) => ipcRenderer.invoke("list-drive-folder-files", args),
 
-moveDriveFileBetweenServerFolders: (args: {
-  accessToken: string;
-  serverId: string;
-  loader: string;
-  fileId: string;
-  fromFolderName: "mods" | "mods-disabled";
-  toFolderName: "mods" | "mods-disabled";
-}) => ipcRenderer.invoke("move-drive-file-between-server-folders", args),
+  moveDriveFileBetweenServerFolders: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    fileId: string;
+    fromFolderName: "mods" | "mods-disabled";
+    toFolderName: "mods" | "mods-disabled";
+  }) => ipcRenderer.invoke("move-drive-file-between-server-folders", args),
 
-deleteDriveFile: (args: {
-  accessToken: string;
-  fileId: string;
-}) => ipcRenderer.invoke("delete-drive-file", args),
+  selectWorldFolder: () => ipcRenderer.invoke("select-world-folder"),
 
-downloadModsToFolder: (args: {
-  accessToken: string;
-  serverId: string;
-  loader: string;
-  localDestination: string;
-}) => ipcRenderer.invoke("download-mods-to-folder", args),
+  openServerLiveAdmin: (args: { serverId: string; accessToken: string }) =>
+    ipcRenderer.invoke("open-server-live-admin", args),
 
-restoreSnapshot: (args: {
-  snapshotId: string;
-  serverPath: string;
-  serverId: string;
-  loader: string;
-  accessToken: string;
-}) => ipcRenderer.invoke("restore-snapshot", args),
+  importExistingWorld: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    mcVersion: string;
+    loaderVersion?: string;
+    sourceWorldPath: string;
+    extractPath: string;
+    retention?: number;
+    port?: number;
+  }) => ipcRenderer.invoke("import-existing-world", args),
+
+  deleteDriveFile: (args: {
+    accessToken: string;
+    fileId: string;
+  }) => ipcRenderer.invoke("delete-drive-file", args),
+
+  downloadModsToFolder: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+    localDestination: string;
+  }) => ipcRenderer.invoke("download-mods-to-folder", args),
+
+  restoreSnapshot: (args: {
+    snapshotId: string;
+    serverPath: string;
+    serverId: string;
+    loader: string;
+    accessToken: string;
+  }) => ipcRenderer.invoke("restore-snapshot", args),
 
   linkDrive: (args: { uid: string; serverId?: string }) =>
     ipcRenderer.invoke("link-drive", args),
   shellOpenExternal: (url: string) => shell.openExternal(url),
   selectFolder: () => ipcRenderer.invoke("select-folder"),
   downloadFromDrive: (args: { fileId: string; destPath: string; accessToken: string }) =>
-  	ipcRenderer.invoke("downloadFromDrive", args),
+    ipcRenderer.invoke("downloadFromDrive", args),
   extractZip: (zipPath: string, extractTo: string): Promise<boolean> => ipcRenderer.invoke("extractZip", zipPath, extractTo),
   hostServer: (params: any) => ipcRenderer.invoke("host-server", params),
   loadServerPreset: (serverId: string, zipId: string) => ipcRenderer.invoke("load-server-preset", serverId, zipId),
@@ -112,6 +182,51 @@ restoreSnapshot: (args: {
   getServerLogs: (params: { serverId: string; limit?: number }) =>
     ipcRenderer.invoke("getServerLogs", params),
 
+  getOnlinePlayers: (args: { serverId: string }) =>
+    ipcRenderer.invoke("get-online-players", args),
+
+  timeoutPlayers: (args: {
+    serverId: string;
+    players: string[];
+    minutes: number;
+    reason?: string;
+  }) => ipcRenderer.invoke("timeout-players", args),
+
+  getForgeLoaderVersions: (mcVersion: string) =>
+    ipcRenderer.invoke("get-forge-loader-versions", mcVersion),
+
+  onOnlinePlayersChanged: (
+    callback: (data: { serverId: string; players: string[]; count: number }) => void
+  ) => {
+    const listener = (
+      _event: any,
+      data: { serverId: string; players: string[]; count: number }
+    ) => callback(data);
+
+    ipcRenderer.on("online-players-changed", listener);
+    return () => ipcRenderer.removeListener("online-players-changed", listener);
+  },
+
+  startRestoreVerification: (args: {
+    snapshotId: string;
+    serverPath: string;
+    serverId: string;
+    loader: string;
+    accessToken: string;
+  }) => ipcRenderer.invoke("start-restore-verification", args),
+
+  getRestoreVerificationStatus: (args: { serverId: string }) =>
+    ipcRenderer.invoke("get-restore-verification-status", args),
+
+  onRestoreVerificationProgress: (callback: (data: any) => void) => {
+    const listener = (_: any, data: any) => callback(data);
+    ipcRenderer.on("restore-verification-progress", listener);
+
+    return () => {
+      ipcRenderer.removeListener("restore-verification-progress", listener);
+    };
+  },
+
   openServerConsole: (params: {
     serverId: string;
     role?: string;
@@ -119,16 +234,22 @@ restoreSnapshot: (args: {
     ram?: string | null;
     mcVersion?: string | null;
     isAdmin?: boolean;
+    accessToken?: string | null;
   }) => ipcRenderer.invoke("open-server-console", params),
 
-getServerDriveUsage: (args: { accessToken: string; serverId: string; loader: string }) =>
-  ipcRenderer.invoke("get-server-drive-usage", args),
+  detectPreparedServerRuntime: (args: {
+    loader: string;
+    extractPath: string;
+  }) => ipcRenderer.invoke("detect-prepared-server-runtime", args),
+
+  getServerDriveUsage: (args: { accessToken: string; serverId: string; loader: string }) =>
+    ipcRenderer.invoke("get-server-drive-usage", args),
 
   openServerMetrics: () =>
     ipcRenderer.invoke("open-server-metrics"),
 
-openServerOwner: (args: { serverId: string; accessToken: string }) =>
-  ipcRenderer.invoke("open-server-owner", args),
+  openServerOwner: (args: { serverId: string; accessToken: string }) =>
+    ipcRenderer.invoke("open-server-owner", args),
 
   getRunningServerMetrics: () =>
     ipcRenderer.invoke("get-running-server-metrics"),
@@ -136,78 +257,92 @@ openServerOwner: (args: { serverId: string; accessToken: string }) =>
   setMetricsHistoryWindow: (minutes: 3 | 6 | 9) =>
     ipcRenderer.invoke("set-metrics-history-window", minutes),
 
-startServerProcess: (params: {
-  serverId: string;
-  pathToServerJar: string;
-  ram: string;
-  preferredPort?: number;
-}) => ipcRenderer.invoke("startServerProcess", params),
+  checkServerRuntime: (args: {
+    loader: string;
+    extractPath: string;
+  }) => ipcRenderer.invoke("check-server-runtime", args),
+
+  startServerProcess: (params: {
+    serverId: string;
+    pathToServerJar?: string | null;
+    launchMode?: "jar" | "forge-args";
+    forgeUserJvmArgsPath?: string | null;
+    forgeWinArgsPath?: string | null;
+    forgeUnixArgsPath?: string | null;
+    serverFolder?: string | null;
+    ram: string;
+    preferredPort?: number;
+  }) => ipcRenderer.invoke("startServerProcess", params),
+
   stopServerProcess: (params: { serverId: string }) =>
     ipcRenderer.invoke("stopServerProcess", params),
+
   sendServerCommand: (params: { serverId: string; command: string }) =>
     ipcRenderer.invoke("sendServerCommand", params),
+
   getRunningServerInfo: (params: { serverId: string }) =>
     ipcRenderer.invoke("getRunningServerInfo", params),
+
   readServerProperties: (folderPath: string) => ipcRenderer.invoke("readServerProperties", folderPath),
   writeServerProperties: (folderPath: string, updates: Record<string, string>) => ipcRenderer.invoke("writeServerProperties", folderPath, updates),
   getPublicIp: () => ipcRenderer.invoke("get-public-ip"),
 
-checkPortReachability: (args: { ip: string; port: number }) =>
-  ipcRenderer.invoke("check-port-reachability", args),
+  checkPortReachability: (args: { ip: string; port: number }) =>
+    ipcRenderer.invoke("check-port-reachability", args),
 
-backupServer: (args: {
-  serverPath: string;
-  serverId: string;
-  loader: string;
-  accessToken: string;
-  retention?: number;
-}) => ipcRenderer.invoke("backup-server", args),
+  backupServer: (args: {
+    serverPath: string;
+    serverId: string;
+    loader: string;
+    accessToken: string;
+    retention?: number;
+  }) => ipcRenderer.invoke("backup-server", args),
 
   softDeleteServer: (serverPath: string, serverId: string) =>
     ipcRenderer.invoke("soft-delete-server", serverPath, serverId),
 
-listServerBackups: ({ serverId, loader, accessToken }: { serverId: string; loader: string; accessToken: string }) =>
-  ipcRenderer.invoke("list-server-backups", { serverId, loader, accessToken }),
+  listServerBackups: ({ serverId, loader, accessToken }: { serverId: string; loader: string; accessToken: string }) =>
+    ipcRenderer.invoke("list-server-backups", { serverId, loader, accessToken }),
 
-downloadBackupFromDrive: (
-  fileId: string,
-  destPath: string,
-  accessToken: string
-) =>
-  ipcRenderer.invoke("downloadBackupFromDrive", {
-    fileId,
-    destPath,
-    accessToken,
-  }),
-
-
+  downloadBackupFromDrive: (
+    fileId: string,
+    destPath: string,
+    accessToken: string
+  ) =>
+    ipcRenderer.invoke("downloadBackupFromDrive", {
+      fileId,
+      destPath,
+      accessToken,
+    }),
 
 
-createServerZip: (args: {
-  accessToken: string;
-  driveFolderId: string;
-  serverId: string;
-  settings: Record<string, string>;
-  loader: string;
-  mcVersion: string;
-}) => ipcRenderer.invoke("create-server-zip", args),
-
-startGoogleOAuth: () =>
-  ipcRenderer.invoke("start-google-oauth"),
-
-ensureDriveFolderPath: (args: {
-  accessToken: string;
-  serverId: string;
-  loader: string;
-}) => ipcRenderer.invoke("ensure-drive-folder-path", args),
-
-getValidAccessToken: (args: {
-  userId: string;
-  driveId: string;
-}) => ipcRenderer.invoke("get-valid-access-token", args),
 
 
-onBackupProgress: (callback: (data: any) => void) => {
+  createServerZip: (args: {
+    accessToken: string;
+    driveFolderId: string;
+    serverId: string;
+    settings: Record<string, string>;
+    loader: string;
+    mcVersion: string;
+  }) => ipcRenderer.invoke("create-server-zip", args),
+
+  startGoogleOAuth: () =>
+    ipcRenderer.invoke("start-google-oauth"),
+
+  ensureDriveFolderPath: (args: {
+    accessToken: string;
+    serverId: string;
+    loader: string;
+  }) => ipcRenderer.invoke("ensure-drive-folder-path", args),
+
+  getValidAccessToken: (args: {
+    userId: string;
+    driveId: string;
+  }) => ipcRenderer.invoke("get-valid-access-token", args),
+
+
+  onBackupProgress: (callback: (data: any) => void) => {
     const listener = (_: any, data: any) => callback(data);
     ipcRenderer.on("backup-progress", listener);
 
@@ -233,7 +368,7 @@ onBackupProgress: (callback: (data: any) => void) => {
       console.warn(`Channel "${channel}" is not allowed to receive.`);
     }
   },
-  
+
   onServerLog: (callback: (data: { serverId: string; log: string }) => void) => {
     const listener = (_event: any, data: { serverId: string; log: string }) => callback(data);
     ipcRenderer.on("server-log", listener);
@@ -242,20 +377,8 @@ onBackupProgress: (callback: (data: any) => void) => {
 
 
 
-onServerState: (
-  callback: (data: {
-    serverId: string;
-    state: "starting" | "running" | "stopping" | "stopped" | "crashed";
-    port?: number | null;
-    pid?: number | null;
-    startedAt?: number | null;
-    upnpStatus?: "idle" | "opening" | "mapped" | "failed" | "closing";
-    upnpError?: string | null;
-  }) => void
-) => {
-  const listener = (
-    _event: any,
-    data: {
+  onServerState: (
+    callback: (data: {
       serverId: string;
       state: "starting" | "running" | "stopping" | "stopped" | "crashed";
       port?: number | null;
@@ -263,34 +386,46 @@ onServerState: (
       startedAt?: number | null;
       upnpStatus?: "idle" | "opening" | "mapped" | "failed" | "closing";
       upnpError?: string | null;
-    }
-  ) => callback(data);
+    }) => void
+  ) => {
+    const listener = (
+      _event: any,
+      data: {
+        serverId: string;
+        state: "starting" | "running" | "stopping" | "stopped" | "crashed";
+        port?: number | null;
+        pid?: number | null;
+        startedAt?: number | null;
+        upnpStatus?: "idle" | "opening" | "mapped" | "failed" | "closing";
+        upnpError?: string | null;
+      }
+    ) => callback(data);
 
-  ipcRenderer.on("server-state", listener);
-  return () => ipcRenderer.removeListener("server-state", listener);
-},
+    ipcRenderer.on("server-state", listener);
+    return () => ipcRenderer.removeListener("server-state", listener);
+  },
 
-onServerClosed: (
-  callback: (data: {
-    serverId: string;
-    code: number;
-    expected: boolean;
-    state: "stopped" | "crashed";
-  }) => void
-) => {
-  const listener = (
-    _event: any,
-    data: {
+  onServerClosed: (
+    callback: (data: {
       serverId: string;
       code: number;
       expected: boolean;
       state: "stopped" | "crashed";
-    }
-  ) => callback(data);
+    }) => void
+  ) => {
+    const listener = (
+      _event: any,
+      data: {
+        serverId: string;
+        code: number;
+        expected: boolean;
+        state: "stopped" | "crashed";
+      }
+    ) => callback(data);
 
-  ipcRenderer.on("server-closed", listener);
-  return () => ipcRenderer.removeListener("server-closed", listener);
-},
+    ipcRenderer.on("server-closed", listener);
+    return () => ipcRenderer.removeListener("server-closed", listener);
+  },
 
   once: (channel: string, func: (...args: any[]) => void) => {
     if (validReceiveChannels.includes(channel)) {

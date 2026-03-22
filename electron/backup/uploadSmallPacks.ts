@@ -9,6 +9,13 @@ export type PackIndexEntry = {
   fileId: string
   name: string
   size: number
+  entriesByPath?: Record<
+    string,
+    {
+      size: number
+      hash: string
+    }
+  >
 }
 
 export type UploadedSmallPack = {
@@ -21,6 +28,21 @@ export type UploadedSmallPack = {
     path: string
     size: number
   }[]
+}
+
+function buildEntriesByPath(
+  entries: { path: string; size: number; hash: string }[]
+) {
+  const out: Record<string, { size: number; hash: string }> = {}
+
+  for (const entry of entries) {
+    out[entry.path] = {
+      size: entry.size,
+      hash: entry.hash
+    }
+  }
+
+  return out
 }
 
 export async function uploadSmallPacks({
@@ -56,7 +78,7 @@ export async function uploadSmallPacks({
       filePath: pack.packPath,
       fileName: pack.fileName,
       parentId: packsFolderId,
-      onProgress: () => {}
+      onProgress: () => { }
     })
 
     const fileId = res?.id
@@ -67,7 +89,8 @@ export async function uploadSmallPacks({
     packIndex[pack.packHash] = {
       fileId,
       name: pack.fileName,
-      size: stat.size
+      size: stat.size,
+      entriesByPath: buildEntriesByPath(pack.entries)
     }
 
     uploaded[index] = {

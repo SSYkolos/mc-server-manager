@@ -8,6 +8,7 @@ import { doc, getDoc, updateDoc, deleteField } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { db } from "../firebase";
 import ServerPropertiesEditor from "./ServerPropertiesEditor";
+import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 
 
 type RouteParams = {
@@ -53,8 +54,9 @@ export default function ServerConsoleWindow() {
   const initialRam = query.get("ram") || "4G";
   const initialMcVersion = query.get("mcVersion") || "";
   const initialIsAdmin = query.get("isAdmin") === "true";
+  const initialAccessToken = query.get("accessToken") || "";
   const [runtimeState, setRuntimeState] = useState<string>("stopped");
-const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [serverRunning, setServerRunning] = useState(false);
@@ -65,16 +67,28 @@ const [logs, setLogs] = useState<string[]>([]);
   const [port, setPort] = useState<number | null>(null);
   const [pid, setPid] = useState<number | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
-const logContainerRef = useRef<HTMLDivElement | null>(null);
-const logEndRef = useRef<HTMLDivElement | null>(null);
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  const [restoreCheck, setRestoreCheck] = useState<{
+    state: "idle" | "queued" | "running" | "passed" | "failed";
+    message: string;
+    percent: number;
+    failedCount?: number;
+    missingCount?: number;
+  }>({
+    state: "idle",
+    message: "No restore check running",
+    percent: 0,
+  });
 
   const auth = getAuth();
   const currentUser = auth.currentUser;
 
-const uptimeSec = useMemo(() => {
-  if (!startedAt) return 0;
-  return Math.max(0, Math.floor((nowMs - startedAt) / 1000));
-}, [startedAt, nowMs]);
+  const uptimeSec = useMemo(() => {
+    if (!startedAt) return 0;
+    return Math.max(0, Math.floor((nowMs - startedAt) / 1000));
+  }, [startedAt, nowMs]);
 
   useEffect(() => {
     if (!serverId) return;
@@ -84,9 +98,10 @@ const uptimeSec = useMemo(() => {
 
     async function bootstrap() {
       try {
-        const [runtimeInfo, savedLogs] = await Promise.all([
+        const [runtimeInfo, savedLogs, verificationInfo] = await Promise.all([
           window.electronAPI.getRunningServerInfo({ serverId: currentServerId }),
           window.electronAPI.getServerLogs({ serverId: currentServerId, limit: 1000 }),
+          window.electronAPI.getRestoreVerificationStatus({ serverId: currentServerId }),
         ]);
 
         if (!mounted) return;
@@ -95,9 +110,25 @@ const uptimeSec = useMemo(() => {
           setLogs(savedLogs.logs ?? []);
         }
 
+        if (verificationInfo?.success && verificationInfo.status) {
+          const status = verificationInfo.status;
+
+          setRestoreCheck({
+            state: status.state || "idle",
+            message: status.message || "Restore check",
+            percent: status.percent || 0,
+            failedCount: Array.isArray(status.failedFiles)
+              ? status.failedFiles.length
+              : 0,
+            missingCount: Array.isArray(status.missingFiles)
+              ? status.missingFiles.length
+              : 0,
+          });
+        }
+
         if (runtimeInfo.success && runtimeInfo.running && runtimeInfo.data) {
           setRuntimeState(runtimeInfo.data.state || "running");
-	  setServerRunning(runtimeInfo.data.state === "starting" || runtimeInfo.data.state === "running" || runtimeInfo.data.state === "stopping");
+          setServerRunning(runtimeInfo.data.state === "starting" || runtimeInfo.data.state === "running" || runtimeInfo.data.state === "stopping");
           setExtractPath(runtimeInfo.data.extractPath || initialExtractPath);
           setRam(runtimeInfo.data.ram || initialRam);
           setPort(runtimeInfo.data.port);
@@ -105,8 +136,8 @@ const uptimeSec = useMemo(() => {
           setStartedAt(runtimeInfo.data.startedAt);
         } else {
 
-	  setRuntimeState("stopped");
-	  setServerRunning(false);
+          setRuntimeState("stopped");
+          setServerRunning(false);
           if (initialExtractPath) setExtractPath(initialExtractPath);
           if (initialRam) setRam(initialRam);
           if (initialMcVersion) setMcVersion(initialMcVersion);
@@ -123,61 +154,78 @@ const uptimeSec = useMemo(() => {
       setLogs((prev) => [...prev.slice(-999), data.log]);
     });
 
-const unsubscribeState = window.electronAPI.onServerState((data) => {
-  if (data.serverId !== currentServerId) return;
+    const unsubscribeState = window.electronAPI.onServerState((data) => {
+      if (data.serverId !== currentServerId) return;
 
-  setRuntimeState(data.state);
-  setServerRunning(
-    data.state === "starting" ||
-    data.state === "running" ||
-    data.state === "stopping"
-  );
+      setRuntimeState(data.state);
+      setServerRunning(
+        data.state === "starting" ||
+        data.state === "running" ||
+        data.state === "stopping"
+      );
 
-  if (typeof data.port === "number") {
-    setPort(data.port);
-  } else if (data.port === null) {
-    setPort(null);
-  }
+      if (typeof data.port === "number") {
+        setPort(data.port);
+      } else if (data.port === null) {
+        setPort(null);
+      }
 
-  if (typeof data.pid === "number") {
-    setPid(data.pid);
-  } else if (data.pid === null) {
-    setPid(null);
-  }
+      if (typeof data.pid === "number") {
+        setPid(data.pid);
+      } else if (data.pid === null) {
+        setPid(null);
+      }
 
-  if (typeof data.startedAt === "number") {
-    setStartedAt(data.startedAt);
-  } else if (data.startedAt === null) {
-    setStartedAt(null);
-  }
-});
+      if (typeof data.startedAt === "number") {
+        setStartedAt(data.startedAt);
+      } else if (data.startedAt === null) {
+        setStartedAt(null);
+      }
+    });
 
-const unsubscribeClosed = window.electronAPI.onServerClosed((data) => {
-  if (data.serverId !== currentServerId) return;
+    const unsubscribeRestoreCheck =
+      window.electronAPI.onRestoreVerificationProgress((data) => {
+        if (data.serverId !== currentServerId) return;
 
-  setServerRunning(false);
-  setRuntimeState(data.state);
-  setPid(null);
-  setStartedAt(null);
-
-  if (data.state === "crashed") {
-    setLogs((prev) => [
-      ...prev.slice(-999),
-      `[mc-server-manager] Server process crashed or exited unexpectedly (code: ${data.code})\n`,
-    ]);
-  }
-
-  (async () => {
-    try {
-      const serverRef = doc(db, "servers", currentServerId);
-      await updateDoc(serverRef, {
-        liveInfo: deleteField(),
+        setRestoreCheck({
+          state: data.state || "idle",
+          message: data.message || "Restore check",
+          percent: data.percent || 0,
+          failedCount: Array.isArray(data.failedFiles)
+            ? data.failedFiles.length
+            : 0,
+          missingCount: Array.isArray(data.missingFiles)
+            ? data.missingFiles.length
+            : 0,
+        });
       });
-    } catch (err) {
-      console.error("Failed to clear liveInfo from renderer:", err);
-    }
-  })();
-});
+
+    const unsubscribeClosed = window.electronAPI.onServerClosed((data) => {
+      if (data.serverId !== currentServerId) return;
+
+      setServerRunning(false);
+      setRuntimeState(data.state);
+      setPid(null);
+      setStartedAt(null);
+
+      if (data.state === "crashed") {
+        setLogs((prev) => [
+          ...prev.slice(-999),
+          `[mc-server-manager] Server process crashed or exited unexpectedly (code: ${data.code})\n`,
+        ]);
+      }
+
+      (async () => {
+        try {
+          const serverRef = doc(db, "servers", currentServerId);
+          await updateDoc(serverRef, {
+            liveInfo: deleteField(),
+          });
+        } catch (err) {
+          console.error("Failed to clear liveInfo from renderer:", err);
+        }
+      })();
+    });
 
     const interval = window.setInterval(async () => {
       try {
@@ -185,48 +233,49 @@ const unsubscribeClosed = window.electronAPI.onServerClosed((data) => {
           serverId: currentServerId,
         });
 
-if (runtimeInfo.success && runtimeInfo.running && runtimeInfo.data) {
-  setRuntimeState(runtimeInfo.data.state || "running");
-  setServerRunning(
-    runtimeInfo.data.state === "starting" ||
-    runtimeInfo.data.state === "running" ||
-    runtimeInfo.data.state === "stopping"
-  );
-  setExtractPath(runtimeInfo.data.extractPath || initialExtractPath);
-  setRam(runtimeInfo.data.ram || initialRam);
-  setPort(runtimeInfo.data.port);
-  setPid(runtimeInfo.data.pid);
-  setStartedAt(runtimeInfo.data.startedAt);
-} else {
-  setRuntimeState("stopped");
-  setServerRunning(false);
-}
+        if (runtimeInfo.success && runtimeInfo.running && runtimeInfo.data) {
+          setRuntimeState(runtimeInfo.data.state || "running");
+          setServerRunning(
+            runtimeInfo.data.state === "starting" ||
+            runtimeInfo.data.state === "running" ||
+            runtimeInfo.data.state === "stopping"
+          );
+          setExtractPath(runtimeInfo.data.extractPath || initialExtractPath);
+          setRam(runtimeInfo.data.ram || initialRam);
+          setPort(runtimeInfo.data.port);
+          setPid(runtimeInfo.data.pid);
+          setStartedAt(runtimeInfo.data.startedAt);
+        } else {
+          setRuntimeState("stopped");
+          setServerRunning(false);
+        }
 
       } catch (err) {
         console.error("Failed to refresh runtime info", err);
       }
     }, 5000);
 
-return () => {
-  mounted = false;
-  unsubscribeLogs();
-  unsubscribeState();
-  unsubscribeClosed();
-  window.clearInterval(interval);
-};
+    return () => {
+      mounted = false;
+      unsubscribeLogs();
+      unsubscribeState();
+      unsubscribeRestoreCheck();
+      unsubscribeClosed();
+      window.clearInterval(interval);
+    };
   }, [serverId, initialExtractPath, initialRam, initialMcVersion]);
 
-useEffect(() => {
-  const id = window.setInterval(() => {
-    setNowMs(Date.now());
-  }, 1000);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
 
-  return () => window.clearInterval(id);
-}, []);
+    return () => window.clearInterval(id);
+  }, []);
 
-useEffect(() => {
-  logEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-}, [logs]);
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [logs]);
 
 
 
@@ -272,10 +321,10 @@ useEffect(() => {
       const linkedDriveId = serverData?.linkedDriveId;
       const ownerId = serverData?.createdBy;
       const loader = serverData?.loader;
-const retention =
-  typeof serverData?.backupRetentionCount === "number"
-    ? serverData.backupRetentionCount
-    : 5;
+      const retention =
+        typeof serverData?.backupRetentionCount === "number"
+          ? serverData.backupRetentionCount
+          : 5;
 
       if (!linkedDriveId || !ownerId) {
         alert("Server is not linked to a Google Drive account.");
@@ -286,101 +335,136 @@ const retention =
 
       const accessToken = await getFreshAccessToken(ownerId, linkedDriveId);
 
-const result = await window.electronAPI.backupServer({
-  serverPath: extractPath,
-  serverId,
-  loader,
-  accessToken,
-  retention,
-});
+      const result = await window.electronAPI.backupServer({
+        serverPath: extractPath,
+        serverId,
+        loader,
+        accessToken,
+        retention,
+      });
 
-if (!result.success) throw new Error(result.error);
+      if (!result.success) throw new Error(result.error);
 
-const backups = await window.electronAPI.listServerBackups({
-  serverId,
-  loader,
-  accessToken,
-});
+      const backups = await window.electronAPI.listServerBackups({
+        serverId,
+        loader,
+        accessToken,
+      });
 
-const count = backups.length;
-const kept = typeof retention === "number" ? retention : 5;
+      const count = backups.length;
+      const kept = typeof retention === "number" ? retention : 5;
 
-if (count < kept) {
-  alert(`Backup complete. ${count} backup${count === 1 ? "" : "s"} on Drive.`);
-} else {
-  alert(
-    `Backup complete. Retention active (${kept}). ${count} backups kept.`
-  );
-}
+      if (count < kept) {
+        alert(`Backup complete. ${count} backup${count === 1 ? "" : "s"} on Drive.`);
+      } else {
+        alert(
+          `Backup complete. Retention active (${kept}). ${count} backups kept.`
+        );
+      }
     } catch (err) {
       console.error(err);
       alert("Backup failed. Check logs.");
     }
   };
 
-const handleStart = async () => {
-  if (!serverId) return;
+  const handleOpenLiveAdmin = async () => {
+    if (!serverId) return;
 
-  if (!extractPath) {
-    alert("Missing local extract path.");
-    return;
-  }
+    const result = await window.electronAPI.openServerLiveAdmin({
+      serverId,
+      accessToken: initialAccessToken,
+    });
 
-  const jarPath = `${extractPath}/server.jar`;
-  const safeRam = ram ?? "4G";
+    if (!result?.success) {
+      alert("Failed to open Live Admin window.");
+    }
+  };
 
-  const result = await window.electronAPI.startServerProcess({
-    serverId,
-    pathToServerJar: jarPath,
-    ram: safeRam,
-  });
+  const handleStart = async () => {
+    if (!serverId) return;
 
-  if (!result.success) {
-    alert(`Failed to start server: ${result.error}`);
-    return;
-  }
-
-  setRuntimeState("starting");
-  setServerRunning(true);
-  setPort(result.port ?? 25565);
-
-  try {
-    const serverRef = doc(db, "servers", serverId);
-    const serverSnap = await getDoc(serverRef);
-
-    if (!serverSnap.exists()) {
-      throw new Error("Server document not found.");
+    if (!extractPath) {
+      alert("Missing local extract path.");
+      return;
     }
 
-    const serverData = serverSnap.data();
-    const publicIp = await window.electronAPI.getPublicIp();
+    const safeRam = ram ?? "4G";
 
-    await updateDoc(serverRef, {
-      liveInfo: {
-        hostUserId: serverData.createdBy || currentUser?.uid || null,
-        ip: publicIp,
-        port: result.port ?? 25565,
-        status: "online",
-        playerCount: 0,
-      },
-      lastHosted: new Date(),
-    });
-  } catch (err) {
-    console.error("Failed to publish liveInfo from renderer:", err);
-  }
-};
-const handleStop = async () => {
-  if (!serverId) return;
+    try {
+      const serverRef = doc(db, "servers", serverId);
+      const serverSnap = await getDoc(serverRef);
 
-  const result = await window.electronAPI.stopServerProcess({ serverId });
+      if (!serverSnap.exists()) {
+        throw new Error("Server document not found.");
+      }
 
-  if (!result.success) {
-    alert(`Failed to stop server: ${result.error}`);
-    return;
-  }
+      const serverData = serverSnap.data();
+      const loader = serverData?.loader || "vanilla";
+      const loaderVersion = serverData?.loaderVersion || "";
 
-  setRuntimeState("stopping");
-};
+      const runtimeInfo = await window.electronAPI.detectPreparedServerRuntime({
+        loader,
+        extractPath,
+      });
+
+      if (!runtimeInfo.success || !runtimeInfo.ready) {
+        alert(
+          runtimeInfo.error ||
+          "Server runtime is not ready. Re-host/setup the server first."
+        );
+        return;
+      }
+
+      const result = await window.electronAPI.startServerProcess({
+        serverId,
+        launchMode: runtimeInfo.launchMode ?? "jar",
+        pathToServerJar: runtimeInfo.launcherJar ?? null,
+        forgeUserJvmArgsPath: runtimeInfo.userJvmArgsPath ?? null,
+        forgeWinArgsPath: runtimeInfo.winArgsPath ?? null,
+        forgeUnixArgsPath: runtimeInfo.unixArgsPath ?? null,
+        serverFolder: extractPath,
+        ram: safeRam,
+      });
+
+      if (!result.success) {
+        alert(`Failed to start server: ${result.error}`);
+        return;
+      }
+
+      setRuntimeState("starting");
+      setServerRunning(true);
+      setPort(result.port ?? 25565);
+
+      const publicIp = await window.electronAPI.getPublicIp();
+
+      await updateDoc(serverRef, {
+        liveInfo: {
+          hostUserId: serverData.createdBy || currentUser?.uid || null,
+          ip: publicIp,
+          port: result.port ?? 25565,
+          status: "online",
+          playerCount: 0,
+        },
+        lastHosted: new Date(),
+      });
+    } catch (err: any) {
+      alert(err?.message || "Failed to start server.");
+    }
+  };
+
+
+  const handleStop = async () => {
+    if (!serverId) return;
+
+    const result = await window.electronAPI.stopServerProcess({ serverId });
+
+    if (!result.success) {
+      alert(`Failed to stop server: ${result.error}`);
+      return;
+    }
+
+    setRuntimeState("stopping");
+  };
 
 
 
@@ -394,32 +478,32 @@ const handleStop = async () => {
 
   return (
     <>
-<Box
-  sx={{
-    height: "100vh",
-    backgroundColor: "#0b0b0b",
-    color: "#d7ffd7",
-    p: 0,
-    m: 0,
-    boxSizing: "border-box",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-  }}
->
-<Box
-  sx={{
-    flex: 1,
-    minHeight: 0,
-    display: "flex",
-    flexDirection: "column",
-    p: 1.5,
-    backgroundColor: "#0f0f0f",
-    color: "#d7ffd7",
-    boxSizing: "border-box",
-    overflow: "hidden",
-  }}
->
+      <Box
+        sx={{
+          height: "100vh",
+          backgroundColor: "#0b0b0b",
+          color: "#d7ffd7",
+          p: 0,
+          m: 0,
+          boxSizing: "border-box",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
+        <Box
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            p: 1.5,
+            backgroundColor: "#0f0f0f",
+            color: "#d7ffd7",
+            boxSizing: "border-box",
+            overflow: "hidden",
+          }}
+        >
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, gap: 2 }}>
             <Box>
               <Typography variant="h6">Server Console</Typography>
@@ -433,48 +517,71 @@ const handleStop = async () => {
               )}
             </Box>
 
-            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Typography variant="body2">Status: {runtimeState}</Typography>
-              <Typography variant="body2">Port: {port ?? "-"}</Typography>
-              <Typography variant="body2">PID: {pid ?? "-"}</Typography>
-              <Typography variant="body2">RAM: {ram || "-"}</Typography>
-              <Typography variant="body2">Uptime: {formatUptime(uptimeSec)}</Typography>
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+              <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <Typography variant="body2">Status: {runtimeState}</Typography>
+                <Typography variant="body2">Port: {port ?? "-"}</Typography>
+                <Typography variant="body2">PID: {pid ?? "-"}</Typography>
+                <Typography variant="body2">RAM: {ram || "-"}</Typography>
+                <Typography variant="body2">Uptime: {formatUptime(uptimeSec)}</Typography>
+              </Box>
+
+              <Typography
+                variant="body2"
+                sx={{
+                  opacity: 0.85,
+                  color:
+                    restoreCheck.state === "failed"
+                      ? "#ff8a80"
+                      : restoreCheck.state === "passed"
+                        ? "#7CFC90"
+                        : "#bdbdbd",
+                }}
+              >
+                Restore check: {restoreCheck.message}
+                {(restoreCheck.state === "running" ||
+                  restoreCheck.state === "queued") &&
+                  ` (${restoreCheck.percent}%)`}
+                {restoreCheck.state === "failed" &&
+                  ` · missing: ${restoreCheck.missingCount ?? 0}, failed: ${restoreCheck.failedCount ?? 0
+                  }`}
+              </Typography>
             </Box>
           </Box>
 
-<Box
-  ref={logContainerRef}
-  sx={{
-    flex: 1,
-    minHeight: 0,
-    backgroundColor: "#000",
-    color: "#00ff66",
-    fontFamily: "Consolas, Monaco, monospace",
-    overflowY: "auto",
-    overflowX: "hidden",
-    p: 1.5,
-    mb: 1.5,
-    borderRadius: 0,
-    border: "1px solid #1d1d1d",
-    boxShadow: "inset 0 0 0 1px rgba(0,255,102,0.06)",
-  }}
->
-{logs.map((line, index) => (
-  <Typography
-    key={index}
-    variant="body2"
-    component="div"
-    sx={{
-      whiteSpace: "pre-wrap",
-      fontFamily: "Consolas, Monaco, monospace",
-      color: "#00ff66",
-      lineHeight: 1.35,
-    }}
-  >
-    {line}
-  </Typography>
-))}
-<div ref={logEndRef} />
+          <Box
+            ref={logContainerRef}
+            sx={{
+              flex: 1,
+              minHeight: 0,
+              backgroundColor: "#000",
+              color: "#00ff66",
+              fontFamily: "Consolas, Monaco, monospace",
+              overflowY: "auto",
+              overflowX: "hidden",
+              p: 1.5,
+              mb: 1.5,
+              borderRadius: 0,
+              border: "1px solid #1d1d1d",
+              boxShadow: "inset 0 0 0 1px rgba(0,255,102,0.06)",
+            }}
+          >
+            {logs.map((line, index) => (
+              <Typography
+                key={index}
+                variant="body2"
+                component="div"
+                sx={{
+                  whiteSpace: "pre-wrap",
+                  fontFamily: "Consolas, Monaco, monospace",
+                  color: "#00ff66",
+                  lineHeight: 1.35,
+                }}
+              >
+                {line}
+              </Typography>
+            ))}
+            <div ref={logEndRef} />
 
           </Box>
 
@@ -487,15 +594,15 @@ const handleStop = async () => {
               }}
               disabled={!serverRunning}
               placeholder="Type a server command..."
-   style={{
-  flex: 1,
-  backgroundColor: "#000",
-  color: "#00ff66",
-  border: "1px solid #1d1d1d",
-  fontFamily: "Consolas, Monaco, monospace",
-  padding: "10px 12px",
-  outline: "none",
-}}
+              style={{
+                flex: 1,
+                backgroundColor: "#000",
+                color: "#00ff66",
+                border: "1px solid #1d1d1d",
+                fontFamily: "Consolas, Monaco, monospace",
+                padding: "10px 12px",
+                outline: "none",
+              }}
             />
             <Button variant="contained" onClick={sendCommand} disabled={!serverRunning}>
               Send
@@ -503,8 +610,12 @@ const handleStop = async () => {
           </Box>
 
           <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1, flexWrap: "wrap" }}>
-            <Box sx={{ display: "flex", gap: 1 }}>
-              <Button variant="outlined" onClick={handleBackup} disabled={runtimeState !== "stopped" && runtimeState !== "crashed"}>
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+              <Button
+                variant="outlined"
+                onClick={handleBackup}
+                disabled={runtimeState !== "stopped" && runtimeState !== "crashed"}
+              >
                 Backup
               </Button>
 
@@ -516,6 +627,16 @@ const handleStop = async () => {
                 disabled={!extractPath}
               >
                 Settings
+              </Button>
+
+              <Button
+                variant="outlined"
+                color="secondary"
+                startIcon={<AdminPanelSettingsIcon />}
+                onClick={handleOpenLiveAdmin}
+                disabled={!serverRunning}
+              >
+                Live Admin
               </Button>
             </Box>
 
@@ -572,7 +693,10 @@ const handleStop = async () => {
             }}
           >
             <ServerPropertiesEditor
+              serverId={serverId}
               serverPropertiesPath={extractPath}
+              serverRunning={serverRunning}
+              ram={ram}
               onClose={() => setSettingsOpen(false)}
             />
           </Box>

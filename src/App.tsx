@@ -14,6 +14,7 @@ import ServerMetricsWindow from "./components/ServerMetricsWindow";
 import { BackupProvider } from "./backup/BackupContext";
 import { GlobalBackupBar } from "./backup/GlobalBackupBar";
 import OwnerTab from "./components/OwnerTab";
+import LiveAdminPage from "./pages/LiveAdminPage";
 
 import {
   Routes,
@@ -33,7 +34,8 @@ export default function App() {
 const isDetachedWindow =
   location.pathname.startsWith("/console/") ||
   location.pathname === "/metrics" ||
-  location.pathname === "/owner";
+  location.pathname === "/owner" ||
+  location.pathname === "/live-admin";
   const [user, loading] = useAuthState(auth);
   
 
@@ -51,6 +53,7 @@ if (isDetachedWindow) {
       <Route path="/console/:serverId/:role" element={<ServerConsoleWindow />} />
       <Route path="/metrics" element={<ServerMetricsWindow />} />
       <Route path="/owner" element={<OwnerPage />} />
+      <Route path="/live-admin" element={<LiveAdminPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

@@ -9,6 +9,7 @@ const MAX_PACK_SIZE = 32 * 1024 * 1024
 export type BuiltSmallPackEntry = {
   path: string
   size: number
+  hash: string
 }
 
 export type BuiltSmallPack = {
@@ -89,7 +90,8 @@ async function createPack(
     fileName,
     entries: files.map((f) => ({
       path: f.path,
-      size: f.size
+      size: f.size,
+      hash: f.hash
     }))
   }
 }
