@@ -267,13 +267,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         }
         updateSetupProgress("restore", "Backup restored", 1, 1);
 
-        void window.electronAPI.startRestoreVerification({
-          snapshotId: selectedBackup.id,
-          serverPath: extractPath,
-          serverId,
-          loader,
-          accessToken,
-        });
+
 
       } else {
         const zipFileId = await getZipFileId(serverId);
@@ -305,7 +299,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         }
       }
 
-            const modsPath = path.join(extractPath, "mods");
+      const modsPath = path.join(extractPath, "mods");
       const configPath = path.join(extractPath, "config");
       const pluginsPath = path.join(extractPath, "plugins");
 
@@ -351,35 +345,72 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           setLoading(false);
           return;
         }
-      } else {
-        updateSetupProgress("plugins", "Using mods/config/plugins from restored backup", 5, 7);
+
+        updateSetupProgress("runtime", "Preparing server runtime", 6, 7);
+        const runtimeResult = await window.electronAPI.prepareServerRuntime({
+          loader,
+          mcVersion,
+          loaderVersion,
+          extractPath,
+        });
+
+        if (!runtimeResult.success) {
+          alert(`Failed to prepare server runtime: ${runtimeResult.error}`);
+          setLoading(false);
+          return;
+        }
+
+        updateSetupProgress("eula", "Creating eula.txt", 7, 7);
+        const eulaResult = await window.electronAPI.createEula(extractPath);
+        if (!eulaResult) {
+          alert("Failed to create eula.txt");
+          setLoading(false);
+          return;
+        }
+
+        updateSetupProgress("done", "Server setup completed", 7, 7);
+            } else {
+        updateSetupProgress("runtime", "Checking server runtime", 2, 5);
+
+        const runtimeInfo = await window.electronAPI.detectPreparedServerRuntime({
+          loader,
+          extractPath,
+        });
+
+        if (!runtimeInfo?.success) {
+          alert(`Failed to check server runtime: ${runtimeInfo?.error || "Unknown error"}`);
+          setLoading(false);
+          return;
+        }
+
+        if (!runtimeInfo.ready) {
+          updateSetupProgress("runtime", "Preparing missing server runtime", 3, 5);
+
+          const runtimeResult = await window.electronAPI.prepareServerRuntime({
+            loader,
+            mcVersion,
+            loaderVersion,
+            extractPath,
+          });
+
+          if (!runtimeResult.success) {
+            alert(`Failed to prepare server runtime: ${runtimeResult.error}`);
+            setLoading(false);
+            return;
+          }
+        }
+
+        updateSetupProgress("eula", "Creating eula.txt", 4, 5);
+        const eulaResult = await window.electronAPI.createEula(extractPath);
+
+        if (!eulaResult) {
+          alert("Failed to create eula.txt");
+          setLoading(false);
+          return;
+        }
+
+        updateSetupProgress("done", "Restored backup is ready", 5, 5);
       }
-
-      // 5. Minecraft server.jar
-      updateSetupProgress("runtime", "Preparing server runtime", 6, 7);
-      const runtimeResult = await window.electronAPI.prepareServerRuntime({
-        loader,
-        mcVersion,
-        loaderVersion,
-        extractPath,
-      });
-
-      if (!runtimeResult.success) {
-        alert(`Failed to prepare server runtime: ${runtimeResult.error}`);
-        setLoading(false);
-        return;
-      }
-
-      // 6. Eula.txt
-      updateSetupProgress("eula", "Creating eula.txt", 7, 7);
-      const eulaResult = await window.electronAPI.createEula(extractPath);
-      if (!eulaResult) {
-        alert("Failed to create eula.txt");
-        setLoading(false);
-        return;
-      }
-
-      updateSetupProgress("done", "Server setup completed", 7, 7);
 
       window.setTimeout(() => {
         onExtractPathReady(extractPath, allocatedRam, mcVersion);

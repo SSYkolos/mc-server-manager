@@ -2753,6 +2753,9 @@ ipcMain.handle("backup-server", async (_e, args) => {
       accessToken,
       driveBackupFolderId: serverRootId,
       retention: keepCount,
+      onProgress: (progress) => {
+        mainWindow?.webContents.send("backup-progress", progress);
+      },
     });
 
     const allSnapshots = await listSnapshotFolders({
@@ -2795,10 +2798,13 @@ ipcMain.handle("backup-server", async (_e, args) => {
     console.log("[retention] deleted packs =", gcResult.deletedPacks);
 
     mainWindow?.webContents.send("prompt-delete-local-server", { serverPath });
+
     mainWindow?.webContents.send("backup-progress", {
-      uploaded: 0,
-      total: 0,
-      percent: 0,
+      phase: "done",
+      title: "Backup",
+      message: "Backup completed",
+      detail: "Snapshot uploaded and cleanup finished",
+      percent: 100,
     });
 
     return { success: true };
@@ -2806,9 +2812,11 @@ ipcMain.handle("backup-server", async (_e, args) => {
     console.error("❌ BACKUP V2 FAILED:", err);
 
     mainWindow?.webContents.send("backup-progress", {
-      uploaded: 0,
-      total: 0,
-      percent: 0,
+      phase: "error",
+      title: "Backup",
+      message: err.message || String(err),
+      detail: err.message || String(err),
+      percent: 100,
     });
 
     return { success: false, error: err.message || String(err) };

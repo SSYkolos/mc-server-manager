@@ -98,21 +98,56 @@ function isWorldChunkLikePath(relPath: string) {
   )
 }
 
+type BackupProgressPhase =
+  | "scanning"
+  | "packing"
+  | "uploading"
+  | "saving-indexes"
+  | "snapshot"
+  | "finalizing"
+  | "done"
+  | "error";
+
+type BackupProgressPayload = {
+  phase: BackupProgressPhase;
+  percent: number;
+  title?: string;
+  message?: string;
+  detail?: string;
+  uploaded?: number;
+  total?: number;
+};
+
 export async function backupServerV2({
   serverPath,
   serverId,
   accessToken,
   driveBackupFolderId,
-  retention
+  retention,
+  onProgress,
 }: {
   serverPath: string
   serverId: string
   accessToken: string
   driveBackupFolderId: string
   retention: number
+  onProgress?: (progress: BackupProgressPayload) => void
 }) {
   console.log("BACKUP V2 START")
   console.log("BACKUP V2 NEW OPTIMIZED BUILD ACTIVE")
+  const emit = (progress: BackupProgressPayload) => {
+    onProgress?.({
+      title: "Backup",
+      ...progress,
+    });
+  };
+
+  emit({
+    phase: "scanning",
+    percent: 6,
+    message: "Scanning files",
+    detail: "Reading local files and backup state",
+  });
   const structure = await ensureBackupStructure({
     accessToken,
     serverRootFolderId: driveBackupFolderId
@@ -144,6 +179,12 @@ export async function backupServerV2({
   } = await scanBackupFiles(serverPath, previousHashCache)
 
   nextHashCache = computedNextHashCache
+  emit({
+    phase: "packing",
+    percent: 22,
+    message: "Building small packs",
+    detail: `${files.length} files scanned`,
+  });
 
   console.log("FILES FOUND:", files.length)
   console.log("HASH REUSED EXACT:", stats.exactReuseCount)
@@ -199,6 +240,12 @@ export async function backupServerV2({
   }
 
   try {
+    emit({
+      phase: "packing",
+      percent: 32,
+      message: "Building small packs",
+      detail: `${changedSmallFiles.length} changed small files, ${unchangedSmallFiles.length} reused`,
+    })
     const smallPacks = await buildSmallPacks(changedSmallFiles, tempDir)
 
     const uploadedSmallPacks = await uploadSmallPacks({
@@ -207,7 +254,12 @@ export async function backupServerV2({
       packsFolderId: structure.packsSmall,
       packIndex
     })
-
+    emit({
+      phase: "uploading",
+      percent: 52,
+      message: "Uploading changed data",
+      detail: `${smallPacks.length} pack(s), ${largeObjectInputs.length} large object candidate(s)`,
+    })
     const largeObjects = await prepareLargeObjects(largeObjectInputs)
 
     const uploadJobs = await uploadLargeObjects({
@@ -218,7 +270,12 @@ export async function backupServerV2({
     })
 
     await runUploadQueue(uploadJobs, getWorkerCount(uploadJobs.length))
-
+    emit({
+      phase: "saving-indexes",
+      percent: 74,
+      message: "Saving indexes",
+      detail: "Updating object and pack indexes",
+    })
     await saveObjectIndex({
       accessToken,
       fileId: structure.objectIndexFileId,
@@ -230,7 +287,12 @@ export async function backupServerV2({
       fileId: structure.packIndexFileId,
       data: packIndex
     })
-
+    emit({
+      phase: "snapshot",
+      percent: 86,
+      message: "Writing snapshot",
+      detail: "Preparing manifest",
+    })
     const snapshotId = (() => {
       const now = new Date()
       return (
@@ -252,34 +314,34 @@ export async function backupServerV2({
     > = {}
 
     // 1) Reuse unchanged small files from previous file-state + current pack index
-for (const file of unchangedSmallFiles) {
-  const prev = previousFileState?.[file.path]
+    for (const file of unchangedSmallFiles) {
+      const prev = previousFileState?.[file.path]
 
-  if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
-    throw new Error(`Missing reusable pack metadata for ${file.path}`)
-  }
+      if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
+        throw new Error(`Missing reusable pack metadata for ${file.path}`)
+      }
 
-  const packMeta = packIndex[prev.packHash]
+      const packMeta = packIndex[prev.packHash]
 
-  if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
-    throw new Error(`Missing packIndex entry for ${file.path}`)
-  }
+      if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
+        throw new Error(`Missing packIndex entry for ${file.path}`)
+      }
 
-  const entry = packMeta.entriesByPath[file.path]
-  if (!entry) {
-    throw new Error(`Pack membership missing for ${file.path}`)
-  }
+      const entry = packMeta.entriesByPath[file.path]
+      if (!entry) {
+        throw new Error(`Pack membership missing for ${file.path}`)
+      }
 
-  if (entry.size !== file.size || entry.hash !== file.hash) {
-    throw new Error(`Pack membership mismatch for ${file.path}`)
-  }
+      if (entry.size !== file.size || entry.hash !== file.hash) {
+        throw new Error(`Pack membership mismatch for ${file.path}`)
+      }
 
-  pathToPack[file.path] = {
-    fileId: packMeta.fileId,
-    fileName: packMeta.name,
-    packHash: prev.packHash
-  }
-}
+      pathToPack[file.path] = {
+        fileId: packMeta.fileId,
+        fileName: packMeta.name,
+        packHash: prev.packHash
+      }
+    }
 
     // 2) Add newly uploaded/reused changed packs
     for (const pack of uploadedSmallPacks) {
@@ -339,7 +401,12 @@ for (const file of unchangedSmallFiles) {
     })
 
     const manifestPath = path.join(snapshotDir, "manifest.json")
-
+    emit({
+      phase: "snapshot",
+      percent: 92,
+      message: "Writing snapshot",
+      detail: `Uploading snapshot ${snapshotId}`,
+    })
     await uploadSnapshotManifest({
       accessToken,
       snapshotsFolderId: structure.snapshots,
@@ -374,7 +441,12 @@ for (const file of unchangedSmallFiles) {
         storage: "large-object"
       }
     }
-
+    emit({
+      phase: "finalizing",
+      percent: 97,
+      message: "Finalizing backup",
+      detail: "Saving file-state cache",
+    })
     await saveFileState({
       accessToken,
       fileId: structure.fileStateFileId,
@@ -391,6 +463,12 @@ for (const file of unchangedSmallFiles) {
       files: files.length,
       smallPackFiles: metadataPackFiles.length,
       largeObjectFiles: largeObjectInputs.length
+    })
+    emit({
+      phase: "done",
+      percent: 100,
+      message: "Backup completed",
+      detail: `Snapshot ${snapshotId} created`,
     })
   } finally {
     await saveHashCache(hashCachePath, nextHashCache)
