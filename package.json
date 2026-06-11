@@ -14,7 +14,8 @@
     "build": "npm run build:react && npm run build:electron",
     "electron:dev": "cross-env NODE_ENV=development npm run build:electron && wait-on tcp:3000 && electron .",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder --win nsis"
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && electron-builder --mac dmg"
   },
   "build": {
     "extends": null,
@@ -46,9 +47,7 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": [ "x64" ]
         }
       ]
     },
@@ -56,6 +55,10 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [ "dmg" ],
+      "category": "public.app-category.utilities"
     }
   },
   "dependencies": {

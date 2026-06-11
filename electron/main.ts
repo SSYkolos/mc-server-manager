@@ -364,7 +364,7 @@ async function uploadLocalFolderToDriveRecursive(args: {
       pageSize: 50,
     });
 
-    for (const oldFile of existing.data.files ?? []) {
+    for (const oldFile of existing.data.files ?? []) { 
       await drive.files.delete({ fileId: oldFile.id! });
     }
 
@@ -427,6 +427,7 @@ function parseNumberLike(value: any, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// get properties saved in server
 function extractImportableServerSettingsFromProperties(raw: string) {
   const parsed = ini.parse(raw);
 
@@ -455,6 +456,7 @@ function extractImportableServerSettingsFromProperties(raw: string) {
   };
 }
 
+
 function normalizeDependencyType(value: any): ModDependencyType {
   const v = String(value || "unknown").toLowerCase();
   if (v === "required") return "required";
@@ -464,6 +466,7 @@ function normalizeDependencyType(value: any): ModDependencyType {
   return "unknown";
 }
 
+// get version loader version for mcversion in server creation
 async function fetchCompatibleModrinthVersions(args: {
   projectId: string;
   loader: string;
@@ -491,10 +494,12 @@ async function fetchCompatibleModrinthVersions(args: {
   return Array.isArray(versions) ? versions : [];
 }
 
+
 function pickPrimaryVersionFile(version: any) {
   return version?.files?.find((f: any) => f.primary) || version?.files?.[0] || null;
 }
 
+// get mods 
 async function fetchModrinthProject(projectId: string) {
   const res = await fetch(`https://api.modrinth.com/v2/project/${projectId}`, {
     headers: getModrinthHeaders(),
@@ -509,6 +514,7 @@ async function fetchModrinthProject(projectId: string) {
 
   return await res.json();
 }
+
 
 async function buildModInstallPreview(args: {
   projectId: string;
@@ -615,6 +621,7 @@ async function buildModInstallPreview(args: {
   };
 }
 
+// uploads mod to drive from: folder/api call
 async function uploadModFileToDrive(args: {
   accessToken: string;
   serverId: string;
@@ -660,6 +667,7 @@ async function uploadModFileToDrive(args: {
   return uploaded.data;
 }
 
+// download choosen modrinth api file for (compatible with server params)
 async function installSingleModrinthProject(args: {
   projectId: string;
   accessToken: string;
@@ -667,6 +675,7 @@ async function installSingleModrinthProject(args: {
   loader: string;
   mcVersion: string;
 }) {
+  // compatibility checked
   const versions = await fetchCompatibleModrinthVersions({
     projectId: args.projectId,
     loader: args.loader,
@@ -716,6 +725,7 @@ async function installSingleModrinthProject(args: {
   };
 }
 
+
 async function applyServerSettingsOverride(args: {
   serverDir: string;
   serverSettingsOverride?: Record<string, any>;
@@ -764,6 +774,7 @@ async function applyServerSettingsOverride(args: {
   await writeServerPropertiesFile(serverDir, updates);
 }
 
+// ipc handler for loading mod information from modrinth/curse-forge api
 ipcMain.handle("preview-mod-install", async (_event, args) => {
   try {
     const { provider, projectId, loader, mcVersion, installedProjectIds } = args ?? {};
@@ -885,6 +896,7 @@ ipcMain.handle("search-mods", async (_event, args) => {
 
 ipcMain.removeHandler("install-discovered-mod");
 
+// handler for uploading chosen mod from search to drive
 ipcMain.handle("install-discovered-mod", async (_event, args) => {
   try {
     const {
@@ -1025,7 +1037,7 @@ ipcMain.handle("install-discovered-mod", async (_event, args) => {
   }
 });
 
-
+// reads server properties file for input base value
 ipcMain.handle("read-importable-server-properties", async (_event, args) => {
   try {
     const { sourceServerPath } = args ?? {};
@@ -1064,6 +1076,7 @@ ipcMain.handle("read-importable-server-properties", async (_event, args) => {
   }
 });
 
+// finding children folders (multi tool) for listing
 async function findChildFolderId(
   drive: any,
   parentId: string,
@@ -1078,6 +1091,7 @@ async function findChildFolderId(
   return res.data.files?.[0]?.id ?? null;
 }
 
+// creating child folder in ?drive
 async function getOrCreateChildFolderId(
   drive: any,
   parentId: string,
@@ -1108,6 +1122,7 @@ async function getOrCreateChildFolderId(
   return created.data.id;
 }
 
+// downloading drive file (retry implemented) const 3
 async function downloadDriveFileToPathWithRetry(args: {
   drive: any;
   fileId: string;
@@ -1142,6 +1157,7 @@ async function downloadDriveFileToPathWithRetry(args: {
   throw lastError;
 }
 
+// non retry download from drive (old)
 async function downloadDriveFileToPath(args: {
   drive: any;
   fileId: string;
@@ -1167,6 +1183,7 @@ async function downloadDriveFileToPath(args: {
   });
 }
 
+// jeve executable load (still need to update)
 function resolveJavaExecutable(): string {
   const possiblePaths = [
     process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, "bin", "java.exe"),
@@ -1181,6 +1198,7 @@ function resolveJavaExecutable(): string {
 
   return "java"; // fallback
 }
+
 
 async function runWithConcurrency<T>(
   items: T[],
@@ -1203,6 +1221,7 @@ async function runWithConcurrency<T>(
   await Promise.all(workers);
 }
 
+// recursive folder donwload (full) ready for both paralel and queue
 async function downloadDriveFolderRecursive(args: {
   drive: any;
   folderId: string;
@@ -1250,6 +1269,7 @@ async function downloadDriveFolderRecursive(args: {
   }
 }
 
+// child folder seach based on name adn paretn id
 async function findChildFolderByName(
   drive: any,
   parentId: string,
@@ -1270,6 +1290,7 @@ async function findChildFolderByName(
   };
 }
 
+// vanilla server setup/runtime checks
 async function prepareVanillaRuntime(mcVersion: string, extractPath: string) {
   const versionManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
   const manifestRes = await fetch(versionManifestUrl);
@@ -1291,10 +1312,13 @@ async function prepareVanillaRuntime(mcVersion: string, extractPath: string) {
   return { success: true };
 }
 
+// still not implemented
 async function preparePaperRuntime(mcVersion: string, extractPath: string) {
   return { success: false, error: "Paper runtime is not implemented yet." };
 }
 
+
+// fabric server setup
 async function prepareFabricRuntime(
   mcVersion: string,
   loaderVersion: string,
@@ -1320,7 +1344,7 @@ async function prepareFabricRuntime(
     throw new Error("No Fabric installer versions were returned.");
   }
 
-  // Prefer a stable installer, otherwise fall back to the first one returned
+  // prefer a stable installer, otherwise fall back to the first one returned
   const chosenInstaller =
     installers.find((entry: any) => entry?.stable === true && entry?.version) ??
     installers.find((entry: any) => entry?.version);
@@ -1330,7 +1354,7 @@ async function prepareFabricRuntime(
     throw new Error("Could not determine a Fabric installer version.");
   }
 
-  // 2) Download the Fabric server bootstrap jar
+  // download the Fabric server bootstrap jar
   const serverJarUrl =
     `https://meta.fabricmc.net/v2/versions/loader/` +
     `${encodeURIComponent(mcVersion)}/` +
@@ -1349,7 +1373,7 @@ async function prepareFabricRuntime(
   const buffer = await jarRes.buffer();
   await fs.promises.mkdir(path.join(extractPath, "mods"), { recursive: true });
   await fs.promises.mkdir(path.join(extractPath, "config"), { recursive: true });
-  // Save as server.jar so your current startServerProcess logic can stay unchanged for now
+  // save as .jar
   const jarPath = path.join(extractPath, "server.jar");
   await fs.promises.writeFile(jarPath, buffer);
 
@@ -1370,6 +1394,7 @@ async function downloadFileToBuffer(url: string): Promise<Buffer> {
   return await res.buffer();
 }
 
+// you might evene know this if you ar enot retarded
 async function fileExists(targetPath: string): Promise<boolean> {
   try {
     await fs.promises.access(targetPath, fs.constants.F_OK);
@@ -1379,6 +1404,8 @@ async function fileExists(targetPath: string): Promise<boolean> {
   }
 }
 
+
+// finding neccessry files for server start
 async function detectForgeLaunch(extractPath: string): Promise<ForgeLaunchInfo | null> {
   const userJvmArgsPath = path.join(extractPath, "user_jvm_args.txt");
   const runBatPath = path.join(extractPath, "run.bat");
@@ -1455,6 +1482,7 @@ async function detectForgeLaunch(extractPath: string): Promise<ForgeLaunchInfo |
   return null;
 }
 
+// installing forge
 async function runForgeInstaller(
   installerJarPath: string,
   extractPath: string
@@ -1494,6 +1522,7 @@ async function runForgeInstaller(
   });
 }
 
+// get forge loader version from mcversion
 ipcMain.handle("get-forge-loader-versions", async (_event, mcVersion: string) => {
   try {
     const normalizedMcVersion = String(mcVersion || "").trim();
@@ -1550,6 +1579,7 @@ ipcMain.handle("get-forge-loader-versions", async (_event, mcVersion: string) =>
   }
 });
 
+// neccesary server setup before hosting
 async function prepareForgeRuntime(
   mcVersion: string,
   loaderVersion: string,
@@ -1637,6 +1667,7 @@ async function prepareForgeRuntime(
   };
 }
 
+// downloads the full folder with childs form cloud
 ipcMain.handle("download-drive-folder", async (_event, args) => {
   try {
     const { accessToken, serverRootFolderId, folderName, localDestination } = args;
@@ -1666,6 +1697,8 @@ ipcMain.handle("download-drive-folder", async (_event, args) => {
   }
 });
 
+
+// selecting existing mc world for new server /mcworld/world
 ipcMain.handle("select-world-folder", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory"],
@@ -1690,6 +1723,7 @@ ipcMain.handle("select-mod-files", async () => {
   return result.filePaths;
 });
 
+// handler for full extraction
 ipcMain.handle("import-existing-world", async (_event, args) => {
   try {
     const {
@@ -1828,6 +1862,7 @@ ipcMain.handle("import-existing-world", async (_event, args) => {
   }
 });
 
+// if you dont understand you a dumb b... basically setting up the server from a previous server
 ipcMain.handle("import-existing-server", async (_event, args) => {
   try {
     const {
@@ -2091,6 +2126,7 @@ ipcMain.handle("import-existing-server", async (_event, args) => {
   }
 });
 
+// serverdetails mods upload... rewriten in 1.0.6
 ipcMain.handle("upload-mods-to-drive", async (_event, args) => {
   try {
     const { accessToken, serverId, loader, filePaths } = args;
@@ -2214,6 +2250,7 @@ ipcMain.handle("download-mods-to-folder", async (_event, args) => {
   }
 });
 
+// lists all children
 ipcMain.handle("list-drive-folder-files", async (_event, args) => {
   try {
     const { accessToken, serverId, loader, folderName } = args;
@@ -2250,6 +2287,7 @@ ipcMain.handle("list-drive-folder-files", async (_event, args) => {
   }
 });
 
+// point to point file movement
 ipcMain.handle("move-drive-file-between-server-folders", async (_event, args) => {
   try {
     const {
@@ -2297,6 +2335,7 @@ ipcMain.handle("move-drive-file-between-server-folders", async (_event, args) =>
   }
 });
 
+// deleting file with fileId
 ipcMain.handle("delete-drive-file", async (_event, args) => {
   try {
     const { accessToken, fileId } = args;
@@ -2314,7 +2353,7 @@ ipcMain.handle("delete-drive-file", async (_event, args) => {
   }
 });
 
-
+// multi tool handler for runtime 
 ipcMain.handle("prepare-server-runtime", async (_event, args) => {
   try {
     const { loader, mcVersion, loaderVersion, extractPath } = args;
