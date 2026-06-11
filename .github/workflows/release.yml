@@ -30,6 +30,7 @@ jobs:
         run: npm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: false
 
       # BUILD FOR MACOS
       - name: Build macOS DMG
@@ -37,6 +38,7 @@ jobs:
         run: npm run dist:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: false
 
       # UPLOAD FILES TO GITHUB RELEASE
       - name: Upload Artifacts to Release
