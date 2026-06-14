@@ -52,7 +52,15 @@ function getAccessTokenCacheKey(userId: string, driveId: string) {
   return `${userId}::${driveId}`;
 }
 
-
+//fejlesztoi kornyezet
+if (!app.isPackaged) {
+  // A require.resolve segít megtalálni a projekt gyökerét a node_modules-hoz képest
+  const projectRoot = path.join(require.resolve('electron-reload'), '..', '..', '..');
+  
+  require('electron-reload')(projectRoot, {
+    electron: path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
+  });
+}
 
 app.whenReady().then(() => {
   const oauthPath = app.isPackaged
@@ -806,59 +814,45 @@ ipcMain.handle("preview-mod-install", async (_event, args) => {
 
 ipcMain.handle("search-mods", async (_event, args) => {
   try {
-    const { provider, query, loader, mcVersion } = args ?? {};
-
-    if (provider !== "modrinth") {
-      return {
-        success: false,
-        error: "Only Modrinth is implemented right now.",
-        results: [],
-      };
-    }
-
+    // 1. Added `isModpack` to the arguments
+    const { provider, query, loader, mcVersion, isModpack } = args ?? {};
     const trimmedQuery = String(query || "").trim();
-    const normalizedLoader = normalizeLoaderForModrinth(String(loader || ""));
     const normalizedMcVersion = String(mcVersion || "").trim();
 
     if (!trimmedQuery) {
       return { success: true, results: [] };
     }
 
-    const facets = [
-      ["project_type:mod"],
-      normalizedLoader ? [`categories:${normalizedLoader}`] : [],
-      normalizedMcVersion ? [`versions:${normalizedMcVersion}`] : [],
-    ].filter((entry) => entry.length > 0);
+    // --- MODRINTH SEARCH LOGIC ---
+    if (provider === "modrinth") {
+      const normalizedLoader = normalizeLoaderForModrinth(String(loader || ""));
+      
+      // 2. Dynamically switch between searching for Mods vs Modpacks
+      const targetType = isModpack ? "modpack" : "mod";
+      const facets: string[][] = [[`project_type:${targetType}`]];
+      
+      // We only apply version/loader filters if we are NOT searching for a modpack
+      if (!isModpack) {
+        if (normalizedLoader) facets.push([`categories:${normalizedLoader}`]);
+        if (normalizedMcVersion) facets.push([`versions:${normalizedMcVersion}`]);
+      }
 
-    const url =
-      `https://api.modrinth.com/v2/search?` +
-      new URLSearchParams({
-        query: trimmedQuery,
-        limit: "20",
-        index: "relevance",
-        facets: JSON.stringify(facets),
-      }).toString();
+      const url = `https://api.modrinth.com/v2/search?` +
+        new URLSearchParams({
+          query: trimmedQuery,
+          limit: "20",
+          index: "relevance",
+          facets: JSON.stringify(facets),
+        }).toString();
 
-    const res = await fetch(url, {
-      headers: getModrinthHeaders(),
-    });
+      const res = await fetch(url, { headers: getModrinthHeaders() });
+      if (!res.ok) throw new Error(`Modrinth search failed: ${res.status}`);
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(
-        `Modrinth search failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`
-      );
-    }
+      const data = await res.json();
+      const hits = Array.isArray(data?.hits) ? data.hits : [];
 
-    const data: any = await res.json();
-    const hits = Array.isArray(data?.hits) ? data.hits : [];
-
-    const results: DiscoveredMod[] = hits.map((hit: any) => {
-      const clientSide = (hit.client_side || "unknown") as ModSideValue;
-      const serverSide = (hit.server_side || "unknown") as ModSideValue;
-
-      return {
-        id: hit.project_id || hit.slug || hit.title,
+      const results = hits.map((hit: any) => ({
+        id: hit.project_id || hit.slug,
         provider: "modrinth",
         projectId: hit.project_id,
         slug: hit.slug,
@@ -866,24 +860,70 @@ ipcMain.handle("search-mods", async (_event, args) => {
         description: hit.description || "",
         iconUrl: hit.icon_url || undefined,
         downloads: typeof hit.downloads === "number" ? hit.downloads : undefined,
-        loaders: Array.isArray(hit.display_categories)
-          ? hit.display_categories.filter((x: any) =>
-            ["fabric", "forge", "neoforge", "quilt"].includes(String(x).toLowerCase())
-          )
-          : [],
+        loaders: Array.isArray(hit.display_categories) ? hit.display_categories : [],
         gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
-        clientSide,
-        serverSide,
-        sideSupport: classifyModSide({ clientSide, serverSide }),
-      };
-    });
+      }));
 
-    return {
-      success: true,
-      results,
-    };
+      return { success: true, results };
+    }
+
+    // --- CURSEFORGE SEARCH LOGIC ---
+    if (provider === "curseforge") {
+      const CURSEFORGE_API_KEY = "$2a$10$DL05z7dolj8fftvWOZkKd.JlNm0iCTfMdituwIZX5pMrrtmYusMVC";
+
+      let modLoaderType = 0;
+      const lowerLoader = String(loader || "").toLowerCase();
+      if (lowerLoader === "forge") modLoaderType = 1;
+      else if (lowerLoader === "fabric") modLoaderType = 4;
+      else if (lowerLoader === "quilt") modLoaderType = 5;
+      else if (lowerLoader === "neoforge") modLoaderType = 6;
+
+      const cfUrl = new URL("https://api.curseforge.com/v1/mods/search");
+      cfUrl.searchParams.set("gameId", "432"); 
+      
+      // 3. Dynamically switch CurseForge Class ID (6 = Mods, 4471 = Modpacks)
+      const targetClassId = isModpack ? "4471" : "6";
+      cfUrl.searchParams.set("classId", targetClassId);  
+      
+      cfUrl.searchParams.set("searchFilter", trimmedQuery);
+      
+      if (!isModpack) {
+        if (normalizedMcVersion) cfUrl.searchParams.set("gameVersion", normalizedMcVersion);
+        if (modLoaderType > 0) cfUrl.searchParams.set("modLoaderType", String(modLoaderType));
+      }
+
+      const res = await fetch(cfUrl.toString(), {
+        headers: {
+          "Accept": "application/json",
+          "x-api-key": CURSEFORGE_API_KEY,
+          "User-Agent": "MC_Manager_App/1.0"
+        }
+      });
+
+      if (!res.ok) throw new Error(`CurseForge search failed: ${res.status}`);
+
+      const data = await res.json();
+      
+      const results = (data.data || []).map((mod: any) => ({
+        id: String(mod.id),
+        provider: "curseforge",
+        projectId: String(mod.id),
+        slug: mod.slug,
+        title: mod.name,
+        description: mod.summary,
+        iconUrl: mod.logo?.thumbnailUrl || undefined,
+        downloads: mod.downloadCount,
+        loaders: isModpack ? [] : [lowerLoader],
+        gameVersions: [],
+      }));
+
+      return { success: true, results };
+    }
+
+    return { success: false, error: "Unknown provider", results: [] };
+
   } catch (error) {
-    console.error("Failed to search mods:", error);
+    console.error("Failed to search:", error);
     return {
       success: false,
       error: error instanceof Error ? error.message : String(error),

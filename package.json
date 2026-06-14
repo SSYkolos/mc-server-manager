@@ -47,7 +47,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [ "x64" ]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -57,7 +59,9 @@
       "allowToChangeInstallationDirectory": true
     },
     "mac": {
-      "target": [ "dmg" ],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.utilities"
     }
   },
@@ -113,6 +117,7 @@
     "cross-env": "^7.0.3",
     "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
+    "electron-reload": "^2.0.0-alpha.1",
     "esbuild": "^0.25.5",
     "eslint": "^8.57.1",
     "eslint-plugin-react": "^7.37.5",

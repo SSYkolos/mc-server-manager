@@ -39,8 +39,9 @@ declare global {
       searchMods: (args: {
         provider: "modrinth" | "curseforge";
         query: string;
-        loader: string;
-        mcVersion: string;
+        loader?: string;
+        mcVersion?: string;
+        isModpack?: boolean;
       }) => Promise<{
         success: boolean;
         results: Array<{

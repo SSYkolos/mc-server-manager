@@ -59,6 +59,8 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
     resourcePack: "",
     enableStatus: true,
     enableArchiveOnShutdown: false,
+    isModpack: false,
+    modpackId: "",
   });
 
   const [selectedDriveId, setSelectedDriveId] = useState("");

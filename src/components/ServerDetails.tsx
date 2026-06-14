@@ -399,12 +399,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       setDiscoverLoading(true);
       setDiscoverError("");
 
-      if (discoverProvider !== "modrinth") {
-        setDiscoverResults([]);
-        setDiscoverError("CurseForge is not wired yet. Use Modrinth first.");
-        return;
-      }
-
       const query = discoverQuery.trim();
       if (!query) {
         setDiscoverResults([]);
