@@ -23,7 +23,6 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState("");
 
-  // When the modal opens, grab the text they typed and auto-search!
   useEffect(() => {
     if (isOpen) {
       setQuery(initialQuery);
@@ -31,7 +30,6 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
         executeSearch(initialQuery, provider);
       }
     } else {
-      // Clear results when closed
       setResults([]);
       setError("");
     }
@@ -63,11 +61,6 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
     }
   };
 
-  const handleManualSearch = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    executeSearch(query, provider);
-  };
-
   if (!isOpen) return null;
 
   return (
@@ -77,7 +70,7 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-gray-50">
           <h2 className="text-xl font-bold text-gray-800">Search Modpacks</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-800 font-bold text-xl px-2">
+          <button type="button" onClick={onClose} className="text-gray-500 hover:text-gray-800 font-bold text-xl px-2">
             ✕
           </button>
         </div>
@@ -86,9 +79,10 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
         <div className="p-6 border-b border-gray-200 space-y-4">
           <div className="flex gap-2">
             <button
+              type="button"
               onClick={() => {
                 setProvider("modrinth");
-                executeSearch(query, "modrinth"); // Auto-search when switching tabs
+                executeSearch(query, "modrinth");
               }}
               className={`flex-1 py-2 rounded-lg text-sm font-semibold transition ${
                 provider === "modrinth" ? "bg-green-100 text-green-800 border-2 border-green-500" : "bg-gray-100 text-gray-600 border-2 border-transparent hover:bg-gray-200"
@@ -97,9 +91,10 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
               Modrinth
             </button>
             <button
+              type="button"
               onClick={() => {
                 setProvider("curseforge");
-                executeSearch(query, "curseforge"); // Auto-search when switching tabs
+                executeSearch(query, "curseforge");
               }}
               className={`flex-1 py-2 rounded-lg text-sm font-semibold transition ${
                 provider === "curseforge" ? "bg-orange-100 text-orange-800 border-2 border-orange-500" : "bg-gray-100 text-gray-600 border-2 border-transparent hover:bg-gray-200"
@@ -109,23 +104,31 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
             </button>
           </div>
 
-          <form onSubmit={handleManualSearch} className="flex gap-2">
+          {/* CHANGED FROM <form> TO <div> TO PREVENT NESTED FORM CRASHES */}
+          <div className="flex gap-2">
             <input
               type="text"
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  executeSearch(query, provider);
+                }
+              }}
               placeholder={`Search ${provider === "modrinth" ? "Modrinth" : "CurseForge"} modpacks...`}
               className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
             />
             <button
-              type="submit"
+              type="button"
+              onClick={() => executeSearch(query, provider)}
               disabled={isSearching || !query.trim()}
               className="px-6 py-2 bg-gray-800 text-white font-medium rounded-lg hover:bg-gray-700 disabled:opacity-50 transition"
             >
               {isSearching ? "Searching..." : "Search"}
             </button>
-          </form>
+          </div>
           {error && <p className="text-sm text-red-600 font-medium">{error}</p>}
         </div>
 
@@ -139,7 +142,6 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
             <div className="space-y-3">
               {results.map((pack) => (
                 <div key={pack.id} className="flex items-center gap-4 bg-white p-4 rounded-lg border border-gray-200 shadow-sm hover:border-blue-300 transition">
-                  {/* Icon */}
                   <div className="w-16 h-16 flex-shrink-0 bg-gray-100 rounded flex items-center justify-center overflow-hidden border border-gray-200">
                     {pack.iconUrl ? (
                       <img src={pack.iconUrl} alt={pack.title} className="w-full h-full object-cover" />
@@ -148,19 +150,13 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
                     )}
                   </div>
                   
-                  {/* Info */}
                   <div className="flex-1 min-w-0">
                     <h3 className="font-bold text-gray-900 truncate">{pack.title}</h3>
                     <p className="text-sm text-gray-500 line-clamp-2 mt-0.5">{pack.description}</p>
-                    {pack.downloads && (
-                      <p className="text-xs text-gray-400 mt-1 font-medium">
-                        ⬇ {pack.downloads.toLocaleString()} downloads
-                      </p>
-                    )}
                   </div>
 
-                  {/* Action */}
                   <button
+                    type="button"
                     onClick={() => {
                       onSelect(pack.id, pack.provider);
                       onClose();

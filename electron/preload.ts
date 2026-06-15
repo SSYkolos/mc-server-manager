@@ -17,11 +17,6 @@ const validReceiveChannels = [
 ];
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Removed fetchFirestore since Firestore is now handled by Firebase JS SDK in React
-  // Removed send-user-token and host-server if those relied on admin SDK
-
-
-
   selectModFiles: () => ipcRenderer.invoke("select-mod-files"),
 
   onRestoreProgress: (callback: (data: any) => void) => {
@@ -56,6 +51,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     mcVersion: string;
   }) => ipcRenderer.invoke("search-mods", args),
 
+  getModpackMetadata: (args: { modpackId: string; provider: string }) => 
+      ipcRenderer.invoke("get-modpack-metadata", args),
+
+  installModpack: (args: {
+        serverId: string;
+        modpackId: string;
+        provider: string;
+        accessToken: string;
+        loader: string;
+      }) => ipcRenderer.invoke("install-modpack", args),
+
+  provisionModpack: (args: {
+    serverId: string;
+    modpackId: string;
+    provider: string;
+    accessToken: string;
+    driveFolderId: string;
+  }) => ipcRenderer.invoke("provision-modpack", args),
 
   previewModInstall: (args: {
     provider: "modrinth" | "curseforge";

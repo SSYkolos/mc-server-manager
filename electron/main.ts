@@ -1,3 +1,5 @@
+import 'dotenv/config';
+import axios from "axios";
 import { createSnapshot } from "./backup";
 import { app, BrowserWindow, ipcMain, shell, dialog, screen } from 'electron';
 import * as path from 'path';
@@ -6,13 +8,17 @@ import { google } from "googleapis";
 import fetch, { Headers, Request, Response } from 'node-fetch';
 import unzipper from "unzipper";
 import { unlink } from "fs/promises";
+import archiver from "archiver";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import * as ini from "ini";
+
 import { getValidAccessToken } from "./getValidAccessToken";
 import { ensureDriveFolderPath } from "./driveFolderManager";
+import { ensureServerBackupFolder } from "./driveFolderManager";
 import { createAndUploadServerZip } from "./createServerZipAndUpload";
 import { createBackupZip } from "./createBackupZip";
 import { uploadResumableToDrive } from "./driveResumableUpload";
+import { getOrCreateFolder } from "./driveFolderManager";
 import os from "os";
 import { createDriveClient } from "./googleAuth";
 import http from "http";
@@ -56,7 +62,7 @@ function getAccessTokenCacheKey(userId: string, driveId: string) {
 if (!app.isPackaged) {
   // A require.resolve segít megtalálni a projekt gyökerét a node_modules-hoz képest
   const projectRoot = path.join(require.resolve('electron-reload'), '..', '..', '..');
-  
+
   require('electron-reload')(projectRoot, {
     electron: path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
   });
@@ -372,7 +378,7 @@ async function uploadLocalFolderToDriveRecursive(args: {
       pageSize: 50,
     });
 
-    for (const oldFile of existing.data.files ?? []) { 
+    for (const oldFile of existing.data.files ?? []) {
       await drive.files.delete({ fileId: oldFile.id! });
     }
 
@@ -826,11 +832,11 @@ ipcMain.handle("search-mods", async (_event, args) => {
     // --- MODRINTH SEARCH LOGIC ---
     if (provider === "modrinth") {
       const normalizedLoader = normalizeLoaderForModrinth(String(loader || ""));
-      
+
       // 2. Dynamically switch between searching for Mods vs Modpacks
       const targetType = isModpack ? "modpack" : "mod";
       const facets: string[][] = [[`project_type:${targetType}`]];
-      
+
       // We only apply version/loader filters if we are NOT searching for a modpack
       if (!isModpack) {
         if (normalizedLoader) facets.push([`categories:${normalizedLoader}`]);
@@ -869,7 +875,7 @@ ipcMain.handle("search-mods", async (_event, args) => {
 
     // --- CURSEFORGE SEARCH LOGIC ---
     if (provider === "curseforge") {
-      const CURSEFORGE_API_KEY = "$2a$10$DL05z7dolj8fftvWOZkKd.JlNm0iCTfMdituwIZX5pMrrtmYusMVC";
+      const CURSEFORGE_API_KEY = process.env.CURSEFORGE_API_KEY;
 
       let modLoaderType = 0;
       const lowerLoader = String(loader || "").toLowerCase();
@@ -879,31 +885,40 @@ ipcMain.handle("search-mods", async (_event, args) => {
       else if (lowerLoader === "neoforge") modLoaderType = 6;
 
       const cfUrl = new URL("https://api.curseforge.com/v1/mods/search");
-      cfUrl.searchParams.set("gameId", "432"); 
-      
+      cfUrl.searchParams.set("gameId", "432");
+
       // 3. Dynamically switch CurseForge Class ID (6 = Mods, 4471 = Modpacks)
       const targetClassId = isModpack ? "4471" : "6";
-      cfUrl.searchParams.set("classId", targetClassId);  
-      
+      cfUrl.searchParams.set("classId", targetClassId);
+
       cfUrl.searchParams.set("searchFilter", trimmedQuery);
-      
+
+      cfUrl.searchParams.set("sortField", "2"); // 2 means sort by Popularity
+      cfUrl.searchParams.set("sortOrder", "desc"); // Put the highest numbers at the top
+
       if (!isModpack) {
         if (normalizedMcVersion) cfUrl.searchParams.set("gameVersion", normalizedMcVersion);
         if (modLoaderType > 0) cfUrl.searchParams.set("modLoaderType", String(modLoaderType));
       }
 
+      if (!CURSEFORGE_API_KEY) {
+        throw new Error("Missing environment variable: CURSEFORGE_API_KEY (set it in your .env)");
+      }
+
       const res = await fetch(cfUrl.toString(), {
         headers: {
-          "Accept": "application/json",
+          Accept: "application/json",
           "x-api-key": CURSEFORGE_API_KEY,
-          "User-Agent": "MC_Manager_App/1.0"
-        }
+          "User-Agent": "MC_Manager_App/1.0",
+        },
       });
+
+
 
       if (!res.ok) throw new Error(`CurseForge search failed: ${res.status}`);
 
       const data = await res.json();
-      
+
       const results = (data.data || []).map((mod: any) => ({
         id: String(mod.id),
         provider: "curseforge",
@@ -932,7 +947,366 @@ ipcMain.handle("search-mods", async (_event, args) => {
   }
 });
 
+ipcMain.handle("get-modpack-metadata", async (event, args: { modpackId: string; provider: string }) => {
+  const { modpackId, provider } = args;
+  const safeProvider = String(provider || "").toLowerCase();
 
+  try {
+    if (safeProvider === "modrinth") {
+      console.log(`[Meta] Fetching Modrinth metadata for ${modpackId}...`);
+      const packRes = await axios.get(`https://api.modrinth.com/v2/project/${modpackId}/version`);
+      const latestVersion = packRes.data[0];
+      
+      // 1. Prioritize finding an actual .mrpack file, fallback to primary
+      const targetFile = latestVersion.files.find((f: any) => f.filename.endsWith('.mrpack')) 
+                      || latestVersion.files.find((f: any) => f.primary) 
+                      || latestVersion.files[0];
+
+      // 2. Setup safe API fallbacks just in case the zip fails!
+      let mcVersion = latestVersion.game_versions?.[0] || "";
+      let loader = latestVersion.loaders?.[0] || "vanilla";
+      let loaderVersion = "";
+
+      try {
+        const tempZipPath = path.join(app.getPath("temp"), `meta-${Date.now()}.mrpack`);
+        const tempExtPath = path.join(app.getPath("temp"), `meta-ext-${Date.now()}`);
+
+        const writer = fs.createWriteStream(tempZipPath);
+        const zipRes = await axios({ url: targetFile.url, method: 'GET', responseType: 'stream' });
+        zipRes.data.pipe(writer);
+        
+        // Use 'close' instead of 'finish' to prevent OS race conditions
+        await new Promise((resolve, reject) => { 
+          writer.on('close', resolve); 
+          writer.on('error', reject); 
+        });
+
+        await fs.createReadStream(tempZipPath).pipe(unzipper.Extract({ path: tempExtPath })).promise();
+        
+        // Add a tiny 100ms buffer to ensure Windows has written the file
+        await new Promise(res => setTimeout(res, 100));
+
+        const manifestPath = path.join(tempExtPath, "modrinth.index.json");
+        if (fs.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+          const deps = manifest.dependencies;
+          
+          if (deps.minecraft) mcVersion = deps.minecraft;
+          if (deps["fabric-loader"]) { loader = "fabric"; loaderVersion = deps["fabric-loader"]; }
+          else if (deps.forge) { loader = "forge"; loaderVersion = deps.forge; }
+          else if (deps.neoforge) { loader = "neoforge"; loaderVersion = deps.neoforge; }
+          else if (deps["quilt-loader"]) { loader = "quilt"; loaderVersion = deps["quilt-loader"]; }
+        }
+
+        fs.rmSync(tempZipPath, { force: true });
+        fs.rmSync(tempExtPath, { recursive: true, force: true });
+
+      } catch (zipErr: any) {
+        console.warn(`[Meta] .mrpack extraction failed, falling back to API data: ${zipErr.message}`);
+      }
+
+      return { success: true, mcVersion, loader, loaderVersion };
+    } 
+    else if (safeProvider === "curseforge") {
+      console.log(`[Meta] Fetching CurseForge metadata for ${modpackId}...`);
+      const cfHeaders = { "x-api-key": process.env.CURSEFORGE_API_KEY, "Accept": "application/json" };
+      const packRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}`, { headers: cfHeaders });
+      const modData = packRes.data.data;
+      const fileId = modData.mainFileId || modData.latestFiles[0]?.id;
+
+      let downloadUrl = null;
+      try {
+        const dlRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}/files/${fileId}/download-url`, { headers: cfHeaders });
+        downloadUrl = dlRes.data.data;
+      } catch (err) {
+        downloadUrl = modData.latestFiles.find((f: any) => f.id === fileId)?.downloadUrl;
+      }
+
+      let mcVersion = "";
+      let loader = "vanilla";
+      let loaderVersion = "";
+
+      try {
+        const tempZipPath = path.join(app.getPath("temp"), `meta-${Date.now()}.zip`);
+        const tempExtPath = path.join(app.getPath("temp"), `meta-ext-${Date.now()}`);
+
+        const writer = fs.createWriteStream(tempZipPath);
+        const zipRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
+        zipRes.data.pipe(writer);
+        
+        await new Promise((resolve, reject) => { 
+          writer.on('close', resolve); 
+          writer.on('error', reject); 
+        });
+
+        await fs.createReadStream(tempZipPath).pipe(unzipper.Extract({ path: tempExtPath })).promise();
+        await new Promise(res => setTimeout(res, 100));
+
+        const manifestPath = path.join(tempExtPath, "manifest.json");
+        if (fs.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+          mcVersion = manifest.minecraft.version;
+          const loaderObj = manifest.minecraft.modLoaders.find((l: any) => l.primary) || manifest.minecraft.modLoaders[0];
+          
+          if (loaderObj && loaderObj.id) {
+            const parts = loaderObj.id.split("-");
+            loader = parts[0]; 
+            loaderVersion = parts[1]; 
+          }
+        }
+
+        fs.rmSync(tempZipPath, { force: true });
+        fs.rmSync(tempExtPath, { recursive: true, force: true });
+      } catch (zipErr: any) {
+        console.warn(`[Meta] CurseForge extraction failed: ${zipErr.message}`);
+      }
+
+      return { success: true, mcVersion, loader, loaderVersion };
+    }
+  } catch (error: any) {
+    console.error("[Meta] Critical Error fetching metadata:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+/**
+ * Recursively walks a local directory and mirrors it perfectly to Google Drive.
+ */
+/**
+ * Maps the directory structure on Drive and collects all files into a giant list.
+ */
+async function mapFoldersAndCollectFiles(localPath: string, driveParentId: string, accessToken: string, jobsArray: any[]) {
+  const items = fs.readdirSync(localPath);
+
+  for (const item of items) {
+    const itemPath = path.join(localPath, item);
+    const stat = fs.statSync(itemPath);
+
+    if (stat.isDirectory()) {
+      // It's a folder: Create it on Drive right now
+      const newFolderId = await getOrCreateFolder(item, driveParentId, accessToken);
+      // Dive into it
+      await mapFoldersAndCollectFiles(itemPath, newFolderId, accessToken, jobsArray);
+    } else {
+      // It's a file: Don't upload it yet! Just add it to our swarm queue.
+      jobsArray.push({
+        localPath: itemPath,
+        fileName: item,
+        driveParentId: driveParentId
+      });
+    }
+  }
+}
+
+/**
+ * Unleashes a concurrent swarm of uploads (e.g., 15 at a time)
+ */
+async function uploadSwarm(jobs: any[], concurrency: number, accessToken: string) {
+  let completed = 0;
+  const pool = new Set<Promise<void>>();
+
+  for (const job of jobs) {
+    const promise = uploadResumableToDrive({
+      accessToken,
+      filePath: job.localPath,
+      fileName: job.fileName,
+      parentId: job.driveParentId,
+      onProgress: () => {} // Silence the individual progress spam
+    }).then(() => {
+      completed++;
+      // Log progress every 50 files so we don't lag the terminal
+      if (completed % 50 === 0 || completed === jobs.length) {
+        console.log(`[Provision] Fast Upload: ${completed} / ${jobs.length} files complete...`);
+      }
+    }).catch(err => {
+      console.error(`[Provision] Failed to upload ${job.fileName}:`, err.message);
+    }).finally(() => {
+      pool.delete(promise);
+    });
+
+    pool.add(promise);
+
+    // If our pool hits the concurrency limit (e.g. 15), wait for one to finish before adding another
+    if (pool.size >= concurrency) {
+      await Promise.race(pool);
+    }
+  }
+
+  // Wait for the very last batch to finish
+  await Promise.all(pool);
+}
+
+ipcMain.handle("provision-modpack", async (event, args: { 
+  serverId: string; 
+  modpackId: string; 
+  provider: string;
+  accessToken: string;
+  driveFolderId: string; // The root Drive folder for this server
+}) => {
+  const { serverId, modpackId, provider, accessToken, driveFolderId } = args;
+  const safeProvider = String(provider || "").toLowerCase();
+  
+  // 1. Setup Hidden Temp Folders
+  const tempServerPath = path.join(app.getPath("temp"), `provision-${serverId}`);
+  const modsFolder = path.join(tempServerPath, "mods");
+  
+  try {
+    if (fs.existsSync(tempServerPath)) fs.rmSync(tempServerPath, { recursive: true, force: true });
+    fs.mkdirSync(modsFolder, { recursive: true });
+
+    // ==========================================
+    // PHASE 1: DOWNLOAD & EXTRACT MODPACK
+    // ==========================================
+    if (safeProvider === "curseforge") {
+      console.log(`[Provision] Starting CurseForge download for ${modpackId}...`);
+      const cfHeaders = { "x-api-key": process.env.CURSEFORGE_API_KEY, "Accept": "application/json" };
+      
+      const packRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}`, { headers: cfHeaders });
+      const modData = packRes.data.data;
+      const fileId = modData.mainFileId || modData.latestFiles[0]?.id;
+      
+      let downloadUrl = null;
+      try {
+        const dlRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}/files/${fileId}/download-url`, { headers: cfHeaders });
+        downloadUrl = dlRes.data.data;
+      } catch (err) {
+        downloadUrl = modData.latestFiles.find((f: any) => f.id === fileId)?.downloadUrl;
+      }
+
+      if (!downloadUrl) throw new Error("No download URL found for CurseForge pack!");
+
+      const packZipPath = path.join(app.getPath("temp"), `pack-${Date.now()}.zip`);
+      const packExtractPath = path.join(app.getPath("temp"), `ext-${Date.now()}`);
+
+      console.log("[Provision] Downloading and Extracting zip...");
+      const writer = fs.createWriteStream(packZipPath);
+      const zipRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
+      zipRes.data.pipe(writer);
+      
+      // FIX 1: Wait for actual OS file close
+      await new Promise((resolve, reject) => { 
+        writer.on('close', resolve); 
+        writer.on('error', reject); 
+      });
+
+      await fs.createReadStream(packZipPath).pipe(unzipper.Extract({ path: packExtractPath })).promise();
+      
+      // FIX 2: Buffer for Windows file system
+      await new Promise(res => setTimeout(res, 100));
+
+      const manifestPath = path.join(packExtractPath, "manifest.json");
+      if (!fs.existsSync(manifestPath)) throw new Error("manifest.json missing from CurseForge zip!");
+      
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+      
+      console.log(`[Provision] Fetching ${manifest.files?.length || 0} mods...`);
+      for (const file of manifest.files || []) {
+        try {
+          const fileRes = await axios.get(`https://api.curseforge.com/v1/mods/${file.projectID}/files/${file.fileID}/download-url`, { headers: cfHeaders });
+          if (fileRes.data.data) {
+            const modName = fileRes.data.data.split('/').pop() || `mod-${file.fileID}.jar`;
+            const modWriter = fs.createWriteStream(path.join(modsFolder, modName));
+            const modStreamRes = await axios({ url: fileRes.data.data, method: 'GET', responseType: 'stream' });
+            modStreamRes.data.pipe(modWriter);
+            await new Promise(resolve => modWriter.on('finish', resolve)); // Individual mod jars are okay on 'finish'
+          }
+        } catch (err) {
+          console.error(`[Provision] Skipping blocked mod ID ${file.projectID}`);
+        }
+      }
+
+      const overridesPath = path.join(packExtractPath, manifest.overrides || "overrides");
+      if (fs.existsSync(overridesPath)) fs.cpSync(overridesPath, tempServerPath, { recursive: true });
+
+      fs.rmSync(packZipPath, { force: true });
+      fs.rmSync(packExtractPath, { recursive: true, force: true });
+
+    } else if (safeProvider === "modrinth") {
+      console.log(`[Provision] Starting Modrinth download for ${modpackId}...`);
+      const packRes = await axios.get(`https://api.modrinth.com/v2/project/${modpackId}/version`);
+      const latestVersion = packRes.data[0];
+      
+      // FIX 3: Prioritize .mrpack files so we don't accidentally download a Server Zip!
+      const targetFile = latestVersion.files.find((f: any) => f.filename.endsWith('.mrpack')) 
+                      || latestVersion.files.find((f: any) => f.primary) 
+                      || latestVersion.files[0];
+
+      const packZipPath = path.join(app.getPath("temp"), `pack-${Date.now()}.mrpack`);
+      const packExtractPath = path.join(app.getPath("temp"), `ext-${Date.now()}`);
+
+      console.log("[Provision] Downloading and Extracting .mrpack...");
+      const writer = fs.createWriteStream(packZipPath);
+      const zipRes = await axios({ url: targetFile.url, method: 'GET', responseType: 'stream' });
+      zipRes.data.pipe(writer);
+      
+      // FIX 1: OS Close
+      await new Promise((resolve, reject) => { 
+        writer.on('close', resolve); 
+        writer.on('error', reject); 
+      });
+
+      await fs.createReadStream(packZipPath).pipe(unzipper.Extract({ path: packExtractPath })).promise();
+      
+      // FIX 2: Buffer
+      await new Promise(res => setTimeout(res, 100));
+
+      const manifestPath = path.join(packExtractPath, "modrinth.index.json");
+      if (!fs.existsSync(manifestPath)) throw new Error(`modrinth.index.json missing! Downloaded: ${targetFile.filename}`);
+      
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+
+      console.log(`[Provision] Fetching ${manifest.files?.length || 0} mods...`);
+      for (const file of manifest.files || []) {
+        const downloadUrl = file.downloads[0];
+        if (downloadUrl) {
+          const fileDest = path.join(tempServerPath, file.path);
+          const dir = path.dirname(fileDest);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+          const modWriter = fs.createWriteStream(fileDest);
+          const modStreamRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
+          modStreamRes.data.pipe(modWriter);
+          await new Promise(resolve => modWriter.on('finish', resolve));
+        }
+      }
+
+      const overridesPath = path.join(packExtractPath, "overrides");
+      if (fs.existsSync(overridesPath)) fs.cpSync(overridesPath, tempServerPath, { recursive: true });
+
+      fs.rmSync(packZipPath, { force: true });
+      fs.rmSync(packExtractPath, { recursive: true, force: true });
+
+    } else {
+      throw new Error(`Unknown provider: '${provider}'`);
+    }
+
+    // ==========================================
+    // PHASE 2: RECURSIVE MIRROR TO GOOGLE DRIVE
+    // ==========================================
+    console.log("[Provision] Modpack built locally. Mapping Drive Folders...");
+    const uploadJobs: any[] = [];
+    
+    // mapFoldersAndCollectFiles and uploadSwarm should still be in your file from earlier!
+    await mapFoldersAndCollectFiles(tempServerPath, driveFolderId, accessToken, uploadJobs);
+
+    console.log(`[Provision] Folder map complete. Unleashing swarm upload for ${uploadJobs.length} files...`);
+    await uploadSwarm(uploadJobs, 15, accessToken);
+
+    // ==========================================
+    // PHASE 3: CLEANUP
+    // ==========================================
+    console.log("[Provision] Cleaning up temp provision folder...");
+    fs.rmSync(tempServerPath, { recursive: true, force: true });
+
+    console.log("[Provision] Modpack Successfully Provisioned to Drive!");
+    return { success: true };
+    
+  } catch (error: any) {
+    console.error("[Provision] Error:", error);
+    if (fs.existsSync(tempServerPath)) fs.rmSync(tempServerPath, { recursive: true, force: true });
+    return { success: false, error: error.message };
+  }
+});
 
 ipcMain.removeHandler("install-discovered-mod");
 

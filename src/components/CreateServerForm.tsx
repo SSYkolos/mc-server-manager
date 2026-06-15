@@ -61,6 +61,7 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
     enableArchiveOnShutdown: false,
     isModpack: false,
     modpackId: "",
+    modpackProvider: "",
   });
 
   const [selectedDriveId, setSelectedDriveId] = useState("");
@@ -287,167 +288,200 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setSuccess("");
-    if (isCreating) return;
+    const handleCreate = async (e: React.FormEvent) => {
+      e.preventDefault();
+      setError("");
+      setSuccess("");
+      if (isCreating) return;
 
-    if (!user) {
-      setError("You must be logged in to create a server.");
-      return;
-    }
-
-    const trimmedName = settings.serverName.trim();
-    if (!trimmedName || trimmedName.length < 3) {
-      setError("Server name must be at least 3 characters long.");
-      return;
-    }
-
-    if (!user.displayName) {
-      setError("Your profile is missing a Minecraft username.");
-      return;
-    }
-
-    if (!selectedDriveId) {
-      setError("Please select a linked Google Drive.");
-      return;
-    }
-
-    if (!settings.mcVersion?.trim()) {
-      setError("Please choose a Minecraft version.");
-      return;
-    }
-
-    if (settings.loader === "forge") {
-      const forgeVersion = settings.loaderVersion?.trim();
-
-      if (!forgeVersion) {
-        setError("Please choose a Forge version.");
+      if (!user) {
+        setError("You must be logged in to create a server.");
         return;
       }
 
-      if (!forgeVersions.includes(forgeVersion)) {
-        setError("Selected Forge version does not belong to the selected Minecraft version.");
-        return;
-      }
-    }
-
-    if (mode === "import-world" || mode === "import-server") {
-      if (!importSupported) {
-        setError("Import currently supports only Vanilla and Fabric.");
+      const trimmedName = settings.serverName.trim();
+      if (!trimmedName || trimmedName.length < 3) {
+        setError("Server name must be at least 3 characters long.");
         return;
       }
 
-      if (settings.loader === "fabric" && !settings.loaderVersion?.trim()) {
-        setError("Fabric loader version is required for Fabric import.");
+      if (!user.displayName) {
+        setError("Your profile is missing a Minecraft username.");
         return;
       }
 
-      if (mode === "import-world" && !selectedWorldPath) {
-        setError("Please choose an existing world folder to import.");
+      if (!selectedDriveId) {
+        setError("Please select a linked Google Drive.");
         return;
       }
 
-      if (mode === "import-server" && !selectedServerPath) {
-        setError("Please choose an existing server folder to import.");
+      if (!settings.mcVersion?.trim()) {
+        setError("Please choose a Minecraft version.");
         return;
       }
 
-      if (!selectedImportParentPath) {
-        setError("Please choose a local destination folder for the managed server.");
-        return;
-      }
-    }
+      if (settings.loader === "forge") {
+        const forgeVersion = settings.loaderVersion?.trim();
 
-    try {
-      setIsCreating(true);
+        if (!forgeVersion) {
+          setError("Please choose a Forge version.");
+          return;
+        }
 
-      const accessToken = await window.electronAPI.getValidAccessToken({
-        userId: user.uid,
-        driveId: selectedDriveId,
-      });
-
-      if (!accessToken) {
-        throw new Error("Missing Google Drive access token");
+        if (!forgeVersions.includes(forgeVersion)) {
+          setError("Selected Forge version does not belong to the selected Minecraft version.");
+          return;
+        }
       }
 
-      const newServerRef = doc(collection(db, "servers"));
+      if (mode === "import-world" || mode === "import-server") {
+        if (!importSupported) {
+          setError("Import currently supports only Vanilla and Fabric.");
+          return;
+        }
 
-      const driveFolderId = await window.electronAPI.ensureDriveFolderPath({
-        accessToken,
-        serverId: newServerRef.id,
-        loader: settings.loader,
-      });
+        if (settings.loader === "fabric" && !settings.loaderVersion?.trim()) {
+          setError("Fabric loader version is required for Fabric import.");
+          return;
+        }
 
-      if (!driveFolderId) {
-        throw new Error("Failed to create folder in Google Drive");
+        if (mode === "import-world" && !selectedWorldPath) {
+          setError("Please choose an existing world folder to import.");
+          return;
+        }
+
+        if (mode === "import-server" && !selectedServerPath) {
+          setError("Please choose an existing server folder to import.");
+          return;
+        }
+
+        if (!selectedImportParentPath) {
+          setError("Please choose a local destination folder for the managed server.");
+          return;
+        }
       }
 
-      await setDoc(newServerRef, {
-        name: trimmedName,
-        createdBy: user.uid,
-        createdByUsername: user.displayName,
-        createdAt: serverTimestamp(),
-        lastHosted: serverTimestamp(),
-        loader: settings.loader,
-        mcVersion: settings.mcVersion?.trim() || "1.20.4",
-        loaderVersion: settings.loaderVersion?.trim() || null,
-        linkedDriveId: selectedDriveId,
-        driveFolderId,
-        users: {
-          [user.uid]: {
-            role: "owner",
-            lastLogin: new Date().toISOString(),
-          },
-        },
-      });
+      try {
+        setIsCreating(true);
 
-      if (mode === "create") {
-        const stringSettings = Object.fromEntries(
-          Object.entries(settings).map(([key, value]) => [key, String(value)])
-        );
+        const accessToken = await window.electronAPI.getValidAccessToken({
+          userId: user.uid,
+          driveId: selectedDriveId,
+        });
 
-        const zipRes = await window.electronAPI.createServerZip({
+        if (!accessToken) {
+          throw new Error("Missing Google Drive access token");
+        }
+
+        const newServerRef = doc(collection(db, "servers"));
+        
+        //intercept the loader to overwrite with modpack
+        const driveCategoryFolder = settings.isModpack ? "modpack" : settings.loader;
+
+        const driveFolderId = await window.electronAPI.ensureDriveFolderPath({
           accessToken,
+          serverId: newServerRef.id,
+          loader: driveCategoryFolder,
+        });
+
+        if (!driveFolderId) {
+          throw new Error("Failed to create folder in Google Drive");
+        }
+
+        await setDoc(newServerRef, {
+          name: trimmedName,
+          createdBy: user.uid,
+          createdByUsername: user.displayName,
+          createdAt: serverTimestamp(),
+          lastHosted: serverTimestamp(),
+          loader: settings.loader,
+          mcVersion: settings.mcVersion?.trim() || "1.20.4",
+          loaderVersion: settings.loaderVersion?.trim() || null,
+          isModpack: settings.isModpack || false,
+          modpackId: settings.isModpack ? settings.modpackId : null,
+          modpackProvider: settings.isModpack ? settings.modpackProvider : null,
+          linkedDriveId: selectedDriveId,
           driveFolderId,
-          serverId: newServerRef.id,
-          settings: stringSettings,
-          loader: settings.loader,
-          mcVersion: settings.mcVersion?.trim() || "1.20.4",
+          users: {
+            [user.uid]: {
+              role: "owner",
+              lastLogin: new Date().toISOString(),
+            },
+          },
         });
 
-        if (!zipRes?.success || !zipRes.zipFileId) {
-          throw new Error("Failed to create server zip");
-        }
+        if (mode === "create") {
+          
+          // 1. Determine the Drive folder category
+          const driveCategoryFolder = settings.isModpack ? "modpack" : settings.loader;
 
-        await updateDoc(newServerRef, {
-          zipFileId: zipRes.zipFileId,
-        });
-      } else if (mode === "import-world") {
-        const extractPath = joinLocalPath(selectedImportParentPath, newServerRef.id);
+          // 2. Build the string settings for the Seed Zip
+          const stringSettings = Object.fromEntries(
+            Object.entries(settings).map(([key, value]) => [key, String(value)])
+          );
 
-        const importRes = await window.electronAPI.importExistingWorld({
-          accessToken,
-          serverId: newServerRef.id,
-          loader: settings.loader,
-          mcVersion: settings.mcVersion?.trim() || "1.20.4",
-          loaderVersion: settings.loaderVersion?.trim() || "",
-          sourceWorldPath: selectedWorldPath,
-          extractPath,
-          retention: 10,
-          port: 25565,
-        });
+          // 3. ALWAYS CREATE THE SEED ZIP FIRST (metadata.json & server.properties)
+          console.log("Creating server seed zip...");
+          const zipRes = await window.electronAPI.createServerZip({
+            accessToken,
+            driveFolderId,
+            serverId: newServerRef.id,
+            settings: stringSettings,
+            loader: driveCategoryFolder, 
+            mcVersion: settings.mcVersion?.trim() || "1.20.4",
+          });
 
-        if (!importRes?.success) {
-          throw new Error(importRes?.error || "Failed to import existing world");
-        }
+          if (!zipRes?.success || !zipRes.zipFileId) {
+            throw new Error("Failed to create server seed zip");
+          }
 
-        await updateDoc(newServerRef, {
-          importType: "world",
-          localPath: extractPath,
-          importedWorldName: importRes.importedWorldName || null,
-        });
+          // Save the Seed Zip ID to Firebase!
+          await updateDoc(newServerRef, {
+            zipFileId: zipRes.zipFileId,
+          });
+
+          // 4. IF MODPACK -> TRIGGER THE CLOUD PROVISIONER
+          if (settings.isModpack && settings.modpackId && settings.modpackProvider) {
+            console.log("Triggering Modpack Cloud Provisioner...");
+            
+            // Notice we are calling 'provisionModpack' now!
+            const provisionRes = await window.electronAPI.provisionModpack({
+              serverId: newServerRef.id,
+              modpackId: settings.modpackId,
+              provider: settings.modpackProvider,
+              accessToken,
+              driveFolderId // Pass the root server folder ID from Drive
+            });
+
+            if (!provisionRes.success) {
+              throw new Error("Modpack Provisioning Failed: " + provisionRes.error);
+            }
+          }
+
+        } else if (mode === "import-world") {
+          const extractPath = joinLocalPath(selectedImportParentPath, newServerRef.id);
+
+          const importRes = await window.electronAPI.importExistingWorld({
+            accessToken,
+            serverId: newServerRef.id,
+            loader: settings.loader,
+            mcVersion: settings.mcVersion?.trim() || "1.20.4",
+            loaderVersion: settings.loaderVersion?.trim() || "",
+            sourceWorldPath: selectedWorldPath,
+            extractPath,
+            retention: 10,
+            port: 25565,
+          });
+
+          if (!importRes?.success) {
+            throw new Error(importRes?.error || "Failed to import existing world");
+          }
+
+          await updateDoc(newServerRef, {
+            importType: "world",
+            localPath: extractPath,
+            importedWorldName: importRes.importedWorldName || null,
+          });
       } else {
         const extractPath = joinLocalPath(selectedImportParentPath, newServerRef.id);
 
@@ -518,6 +552,8 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
       await updateDoc(userRef, {
         servers: arrayUnion(newServerRef.id),
       });
+
+      
 
       setSuccess(
         mode === "create"

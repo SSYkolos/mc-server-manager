@@ -36,6 +36,23 @@ declare global {
         error?: string;
       }>;
 
+
+      installModpack: (args: {
+        serverId: string;
+        modpackId: string;
+        provider: string;
+        accessToken: string;
+        loader: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+
+      provisionModpack: (args: {
+        serverId: string;
+        modpackId: string;
+        provider: string;
+        accessToken: string;
+        driveFolderId: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+
       searchMods: (args: {
         provider: "modrinth" | "curseforge";
         query: string;
@@ -155,6 +172,14 @@ declare global {
       }) => Promise<{
         success: boolean;
         players: string[];
+      }>;
+
+      getModpackMetadata: (args: { modpackId: string; provider: string }) => Promise<{
+        success: boolean;
+        mcVersion?: string;
+        loader?: string;
+        loaderVersion?: string; 
+        error?: string;
       }>;
 
       timeoutPlayers: (args: {

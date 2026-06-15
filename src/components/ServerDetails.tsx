@@ -688,19 +688,29 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       setModsError("");
       setModsNotice("");
 
-      const { accessToken, loader } = await getServerDriveContext();
+      // 1. Grab the whole context object
+      const driveContext = await getServerDriveContext();
+      const { accessToken, loader, serverData } = driveContext;
+
+      // 2. Pull isModpack from INSIDE serverData!
+      const isModpack = serverData?.isModpack || false;
+      
+      // 3. Intercept the folder name
+      const driveCategoryFolder = isModpack ? "modpack" : loader;
+
+      console.log(`[Sync] Intercept active: isModpack=${isModpack} -> Looking in '${driveCategoryFolder}' folder.`);
 
       const [enabledResult, disabledResult] = await Promise.all([
         window.electronAPI.listDriveFolderFiles({
           accessToken,
           serverId,
-          loader,
+          loader: driveCategoryFolder,
           folderName: "mods",
         }),
         window.electronAPI.listDriveFolderFiles({
           accessToken,
           serverId,
-          loader,
+          loader: driveCategoryFolder,
           folderName: "mods-disabled",
         }),
       ]);

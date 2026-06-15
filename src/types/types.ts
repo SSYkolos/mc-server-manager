@@ -113,6 +113,7 @@ export interface CreateServerSettingsProps {
     enableArchiveOnShutdown: boolean;
     isModpack?: boolean;
     modpackId?: string;
+    modpackProvider?: string;
   };
   update: (field: keyof CreateServerSettingsProps["value"], value: any) => void;
 }

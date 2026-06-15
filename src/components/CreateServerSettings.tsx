@@ -11,6 +11,7 @@ type AccordionSectionProps = {
   defaultOpen?: boolean;
 };
 
+
 const AccordionSection: React.FC<AccordionSectionProps> = ({
   title,
   subtitle,
@@ -75,9 +76,8 @@ export const CreateServerSettings: React.FC<Props> = ({
 }) => {
   const isImportWorld = mode === "import-world" || mode === "import-server";
 
-  const [modpackTab, setModpackTab] = React.useState<"search" | "local">("search");
   const [isSearchModalOpen, setIsSearchModalOpen] = React.useState(false);
-  const [searchQuery, setSearchQuery] = React.useState("");
+  const [isFetchingMeta, setIsFetchingMeta] = React.useState(false);
 
   return (
     <>
@@ -148,69 +148,43 @@ export const CreateServerSettings: React.FC<Props> = ({
 
           {/* THE MODPACK TAB AREA */}
           {value.isModpack ? (
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-4">
-              
-              {/* Tab Toggles */}
-              <div className="flex gap-2 border-b border-gray-300 pb-3">
+            <div className="py-2">
+              {!value.modpackId ? (
+                // State 1: Nothing selected yet (Big Plus Button)
                 <button
                   type="button"
-                  onClick={() => setModpackTab("search")}
-                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                    modpackTab === "search" 
-                      ? "bg-blue-100 text-blue-700 font-semibold" 
-                      : "text-gray-600 hover:bg-gray-200"
-                  }`}
+                  onClick={() => setIsSearchModalOpen(true)}
+                  className="w-full flex flex-col items-center justify-center gap-2 py-8 border-2 border-dashed border-gray-300 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition text-gray-500 hover:text-blue-600 bg-white"
                 >
-                  Search Online
+                  <span className="text-4xl font-light">+</span>
+                  <span className="font-medium">Browse Modpacks</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setModpackTab("local")}
-                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                    modpackTab === "local" 
-                      ? "bg-blue-100 text-blue-700 font-semibold" 
-                      : "text-gray-600 hover:bg-gray-200"
-                  }`}
-                >
-                  Import Local File
-                </button>
-              </div>
-
-              {/* Tab Content */}
-              {modpackTab === "search" ? (
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        setIsSearchModalOpen(true);
-                      }
-                    }}
-                    placeholder="Search Modrinth or CurseForge modpacks..." 
-                    className={textInputClass} 
-                  />
-                  <button 
-                    type="button" 
-                    onClick={() => setIsSearchModalOpen(true)}
-                    className="px-4 py-2 bg-gray-800 text-white rounded-lg text-sm font-medium hover:bg-gray-700 transition"
-                  >
-                    Search
-                  </button>
-                </div>
               ) : (
-                <div className="flex flex-col gap-2">
-                  <button 
-                    type="button" 
-                    className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition w-fit"
+                // State 2: Modpack selected successfully
+                <div className="flex items-center justify-between p-4 bg-green-50 border border-green-200 rounded-xl shadow-sm">
+                  <div>
+                    <div className="text-sm font-bold text-green-800">
+                      Modpack ID: {value.modpackId}
+                    </div>
+                    <div className="text-xs text-green-600 uppercase tracking-wide mt-1">
+                      Source: {value.modpackProvider}
+                    </div>
+                    {isFetchingMeta ? (
+                       <div className="text-xs text-gray-500 mt-1 animate-pulse">Detecting game version...</div>
+                    ) : value.mcVersion && (
+                       <div className="text-xs text-gray-700 mt-1 font-medium">
+                         Locked to: {value.loader} {value.mcVersion}
+                       </div>
+                    )}
+                  </div>
+                  
+                  <button
+                    type="button"
+                    onClick={() => setIsSearchModalOpen(true)}
+                    className="px-4 py-2 bg-white border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
                   >
-                    Select .zip or .mrpack
+                    Change
                   </button>
-                  <p className="text-xs text-gray-500">
-                    Select a downloaded modpack archive from your computer. Version and loader will be detected automatically.
-                  </p>
                 </div>
               )}
             </div>
@@ -578,17 +552,27 @@ export const CreateServerSettings: React.FC<Props> = ({
             />
             <span className="text-sm text-gray-800">Enable Server Status</span>
           </div>
-          {/* ADD THIS AT THE BOTTOM OF YOUR COMPONENT */}
-      <ModpackSearchModal 
-        isOpen={isSearchModalOpen}
-        initialQuery={searchQuery} // <-- Add this line
-        onClose={() => setIsSearchModalOpen(false)}
-        onSelect={(modpackId, provider) => {
-          update("modpackId", modpackId);
-        }}
-      />
+          
         </div>
       </AccordionSection>
+      {}
+      <ModpackSearchModal 
+        isOpen={isSearchModalOpen}
+        onClose={() => setIsSearchModalOpen(false)}
+        onSelect={async (modpackId, provider) => {
+          update("modpackId", modpackId);
+          update("modpackProvider", provider);
+          
+          setIsFetchingMeta(true);
+          const meta = await window.electronAPI.getModpackMetadata({ modpackId, provider });
+          if (meta.success) {
+            update("mcVersion", meta.mcVersion);
+            update("loader", meta.loader);
+            update("loaderVersion", meta.loaderVersion);
+          }
+          setIsFetchingMeta(false);
+        }}
+      />
     </>
   );
 };
