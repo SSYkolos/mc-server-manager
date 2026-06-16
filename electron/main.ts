@@ -3189,16 +3189,19 @@ ipcMain.handle("start-google-oauth", async () => {
 });
 
 ipcMain.handle("backup-server", async (_e, args) => {
-  const { serverPath, serverId, loader, accessToken, retention } = args;
+  const { serverPath, serverId, loader, accessToken, retention, driveFolderId, isModpack } = args;
 
   try {
     const serverRootId = await ensureDriveFolderPath({
       accessToken,
       serverId,
       loader,
+      driveFolderId,  
+      isModpack,      
     });
 
     const keepCount = typeof retention === "number" ? retention : 5;
+    
 
     await backupServerV2({
       serverPath,
@@ -3304,7 +3307,7 @@ ipcMain.handle("get-drive-storage-info", async (_event, { accessToken }) => {
 
 ipcMain.handle(
   "start-restore-verification",
-  async (_event, { snapshotId, serverPath, serverId, loader, accessToken }) => {
+  async (_event, { snapshotId, serverPath, serverId, loader, accessToken, driveFolderId, isModpack }: any) => {
     try {
       const existingJob = restoreVerificationJobs.get(serverId);
       if (existingJob) {
@@ -3334,6 +3337,8 @@ ipcMain.handle(
             accessToken,
             serverId,
             loader,
+            driveFolderId,  
+            isModpack,      
           });
 
           const backupStore = await findChildFolderByName(drive, serverRootId, "backup-store");
@@ -3634,7 +3639,7 @@ ipcMain.handle("check-port-reachability", async (_event, { ip, port }) => {
 
 
 
-ipcMain.handle("list-server-backups", async (_event, { serverId, loader, accessToken }) => {
+ipcMain.handle("list-server-backups", async (_event, { serverId, loader, accessToken, driveFolderId, isModpack }: any) => {
   try {
     const drive = createDriveClient(accessToken);
 
@@ -3642,6 +3647,8 @@ ipcMain.handle("list-server-backups", async (_event, { serverId, loader, accessT
       accessToken,
       serverId,
       loader,
+      driveFolderId,  
+      isModpack,      
     });
 
     const backupStore = await findChildFolderByName(drive, serverRootId, "backup-store");
@@ -3704,7 +3711,7 @@ ipcMain.handle("downloadFromDrive", async (_event, { fileId, destPath, accessTok
 
 ipcMain.handle(
   "restore-snapshot",
-  async (_event, { snapshotId, serverPath, serverId, loader, accessToken }) => {
+  async (_event, { snapshotId, serverPath, serverId, loader, accessToken, driveFolderId, isModpack }: any) => {
     try {
       const drive = createDriveClient(accessToken)
 
@@ -3712,9 +3719,12 @@ ipcMain.handle(
         accessToken,
         serverId,
         loader,
+        driveFolderId,  
+        isModpack,      
       })
 
       const backupStore = await findChildFolderByName(drive, serverRootId, "backup-store")
+      
       if (!backupStore) throw new Error("backup-store missing")
 
       const snapshotsFolder = await findChildFolderByName(drive, backupStore.id, "snapshots")

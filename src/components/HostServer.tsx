@@ -99,6 +99,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
 
         const loaderFromDb = data.loader || "vanilla";
         const isModpackFromDb = data.isModpack || false;
+        const driveFolderIdFromDb = data.driveFolderId;
         // Intercept the Drive folder name
         const driveCategoryFolder = isModpackFromDb ? "modpack" : loaderFromDb;
         
@@ -126,6 +127,8 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         const list = await window.electronAPI.listServerBackups({
           serverId,
           loader: driveCategoryFolder,
+          driveFolderId: driveFolderIdFromDb,
+          isModpack: isModpackFromDb,
           accessToken,
         });
 
@@ -219,6 +222,8 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
       accessToken,
       serverId,
       loader: driveCategoryFolder,
+      driveFolderId,
+      isModpack,
     });
 
     if (backups.length > 0 && !selectedBackup) {
@@ -265,6 +270,8 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           serverPath: extractPath,
           serverId,
           loader: driveCategoryFolder,
+          driveFolderId,
+          isModpack,
           accessToken,
         });
 
@@ -280,6 +287,8 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           serverPath: extractPath,
           serverId,
           loader: driveCategoryFolder,
+          driveFolderId,
+          isModpack,
           accessToken,
         });
 

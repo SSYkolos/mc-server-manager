@@ -321,6 +321,8 @@ export default function ServerConsoleWindow() {
       const linkedDriveId = serverData?.linkedDriveId;
       const ownerId = serverData?.createdBy;
       const loader = serverData?.loader;
+      const driveFolderId = serverData?.driveFolderId;
+      const isModpack = serverData?.isModpack;
       const retention =
         typeof serverData?.backupRetentionCount === "number"
           ? serverData.backupRetentionCount
@@ -341,6 +343,8 @@ export default function ServerConsoleWindow() {
         loader,
         accessToken,
         retention,
+        driveFolderId,
+        isModpack,
       });
 
       if (!result.success) throw new Error(result.error);
@@ -349,6 +353,8 @@ export default function ServerConsoleWindow() {
         serverId,
         loader,
         accessToken,
+        driveFolderId,
+        isModpack,
       });
 
       const count = backups.length;

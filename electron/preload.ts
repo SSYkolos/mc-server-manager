@@ -167,6 +167,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverId: string;
     loader: string;
     accessToken: string;
+    driveFolderId?: string; 
+    isModpack?: boolean;    
   }) => ipcRenderer.invoke("restore-snapshot", args),
 
   linkDrive: (args: { uid: string; serverId?: string }) =>
@@ -226,6 +228,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverId: string;
     loader: string;
     accessToken: string;
+    driveFolderId?: string; 
+    isModpack?: boolean;    
   }) => ipcRenderer.invoke("start-restore-verification", args),
 
   getRestoreVerificationStatus: (args: { serverId: string }) =>
@@ -309,13 +313,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     loader: string;
     accessToken: string;
     retention?: number;
+    driveFolderId?: string;
+    isModpack?: boolean;
   }) => ipcRenderer.invoke("backup-server", args),
 
   softDeleteServer: (serverPath: string, serverId: string) =>
     ipcRenderer.invoke("soft-delete-server", serverPath, serverId),
 
-  listServerBackups: ({ serverId, loader, accessToken }: { serverId: string; loader: string; accessToken: string }) =>
-    ipcRenderer.invoke("list-server-backups", { serverId, loader, accessToken }),
+  listServerBackups: (args: {
+    serverId: string;
+    loader: string;
+    accessToken: string;
+    driveFolderId?: string; 
+    isModpack?: boolean;    
+  }) => ipcRenderer.invoke("list-server-backups", args),
 
   downloadBackupFromDrive: (
     fileId: string,
@@ -347,6 +358,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     accessToken: string;
     serverId: string;
     loader: string;
+    driveFolderId?: string; 
+    isModpack?: boolean;    
   }) => ipcRenderer.invoke("ensure-drive-folder-path", args),
 
   getValidAccessToken: (args: {

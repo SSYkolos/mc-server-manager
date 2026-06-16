@@ -1,7 +1,6 @@
 // src/driveFolderManager.ts
 import { addServiceAccountToFolder } from "./addServiceAccount";
 
-
 /**
  * Checks if a folder exists by name in a given parent folder, or creates it if missing.
  * Returns the folder ID.
@@ -76,14 +75,26 @@ export async function ensureDriveFolderPath({
   accessToken,
   serverId,
   loader,
+  driveFolderId, // <-- ÚJ PARAMÉTER
+  isModpack      // <-- ÚJ PARAMÉTER
 }: {
   accessToken: string;
   serverId: string;
   loader: string;
+  driveFolderId?: string; // <-- ÚJ TÍPUS
+  isModpack?: boolean;    // <-- ÚJ TÍPUS
 }): Promise<string> {
+  
+  // ÚTVÁLASZTÓ: Ha az adatbázisból már megkaptuk a pontos mappa ID-t, egyből ezt adjuk vissza!
+  if (driveFolderId) {
+    return driveFolderId;
+  }
+
+  // Fallback a régi (Vanilla/saját loader) módszerre, ha nincs driveFolderId
   const managerFolderId = await getOrCreateFolder("mc-server-manager", null, accessToken);
   const loaderFolderId = await getOrCreateFolder(loader, managerFolderId, accessToken);
   const serverFolderId = await getOrCreateFolder(serverId, loaderFolderId, accessToken);
+  
   return serverFolderId;
 }
 
@@ -96,42 +107,52 @@ export async function ensureServerBackupFolder({
   accessToken,
   loader,
   serverId,
+  driveFolderId, // <-- ÚJ PARAMÉTER
+  isModpack      // <-- ÚJ PARAMÉTER
 }: {
   accessToken: string;
   loader: string;
   serverId: string;
+  driveFolderId?: string; // <-- ÚJ TÍPUS
+  isModpack?: boolean;    // <-- ÚJ TÍPUS
 }): Promise<string> {
-  const managerFolderId = await getOrCreateFolder(
-    "mc-server-manager",
-    null,
-    accessToken
-  );
+  
+  let serverFolderId = driveFolderId;
 
-  const loaderFolderId = await getOrCreateFolder(
-    loader,
-    managerFolderId,
-    accessToken
-  );
+  // Ha nem kaptunk driveFolderId-t, felépítjük a klasszikus fastruktúrát
+  if (!serverFolderId) {
+    const managerFolderId = await getOrCreateFolder(
+      "mc-server-manager",
+      null,
+      accessToken
+    );
 
-  const serverFolderId = await getOrCreateFolder(
-    serverId,
-    loaderFolderId,
-    accessToken
-  );
+    const loaderFolderId = await getOrCreateFolder(
+      loader,
+      managerFolderId,
+      accessToken
+    );
 
+    serverFolderId = await getOrCreateFolder(
+      serverId,
+      loaderFolderId,
+      accessToken
+    );
+  }
+
+  // Akár a DB-ből jött, akár most építettük fel, létrehozzuk BENNE a backups mappát
   const backupsFolderId = await getOrCreateFolder(
     "backups",
-    serverFolderId,
+    serverFolderId, // <-- Itt már garantáltan a jó gyökérmappa (modpack esetén is) lesz a szülő!
     accessToken
   );
 
-await addServiceAccountToFolder(
-  backupsFolderId,
-  "firebase-adminsdk-fbsvc@mc-server-manager-6d2bc.iam.gserviceaccount.com",
-  accessToken
-);
+  // Jogosultság hozzáadása
+  await addServiceAccountToFolder(
+    backupsFolderId,
+    "firebase-adminsdk-fbsvc@mc-server-manager-6d2bc.iam.gserviceaccount.com",
+    accessToken
+  );
 
   return backupsFolderId;
 }
-
-
