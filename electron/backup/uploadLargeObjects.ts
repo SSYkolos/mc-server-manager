@@ -4,6 +4,7 @@ export type ObjectIndexEntry = {
   fileId: string
   name: string
   size: number
+  timestamp?: number // <-- ADDED
 }
 
 export async function uploadLargeObjects({
@@ -45,7 +46,8 @@ export async function uploadLargeObjects({
       objectIndex[obj.hash] = {
         fileId,
         name: fileName,
-        size: obj.size
+        size: obj.size,
+        timestamp: Date.now() // <-- ADDED
       }
     })
   }

@@ -36,9 +36,19 @@ export async function garbageCollectBackupStore({
   let deletedObjects = 0;
   let deletedPacks = 0;
 
+  // 15 Minutes in milliseconds
+  const GRACE_PERIOD_MS = 15 * 60 * 1000;
+  const now = Date.now();
+
   for (const [hash, entry] of Object.entries(objectIndex)) {
     const fileId = (entry as any)?.fileId;
     if (!fileId) continue;
+
+    // --- ADDED: Skip if the file is newer than 15 minutes ---
+    const timestamp = (entry as any)?.timestamp;
+    if (timestamp && (now - timestamp < GRACE_PERIOD_MS)) {
+      continue;
+    }
 
     if (!referencedObjectFileIds.has(fileId)) {
       try {
@@ -54,6 +64,12 @@ export async function garbageCollectBackupStore({
   for (const [packHash, entry] of Object.entries(packIndex)) {
     const fileId = (entry as any)?.fileId;
     if (!fileId) continue;
+
+    // --- ADDED: Skip if the file is newer than 15 minutes ---
+    const timestamp = (entry as any)?.timestamp;
+    if (timestamp && (now - timestamp < GRACE_PERIOD_MS)) {
+      continue;
+    }
 
     if (!referencedPackFileIds.has(fileId)) {
       try {
