@@ -588,6 +588,7 @@ declare global {
         serverFolder?: string | null;
         ram: string;
         preferredPort?: number;
+        mcVersion?: string;
       }) => Promise<{ success: boolean; error?: string; port?: number }>;
 
 

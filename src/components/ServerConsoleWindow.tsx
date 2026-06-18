@@ -430,6 +430,7 @@ export default function ServerConsoleWindow() {
         forgeUnixArgsPath: runtimeInfo.unixArgsPath ?? null,
         serverFolder: extractPath,
         ram: safeRam,
+        mcVersion: mcVersion,
       });
 
       if (!result.success) {

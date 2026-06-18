@@ -11,7 +11,9 @@ import { unlink } from "fs/promises";
 import archiver from "archiver";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import * as ini from "ini";
+import crypto from "crypto";
 
+import { resolveJavaExecutable } from "./JavaScanner";
 import { getValidAccessToken } from "./getValidAccessToken";
 import { ensureDriveFolderPath } from "./driveFolderManager";
 import { ensureServerBackupFolder } from "./driveFolderManager";
@@ -1597,21 +1599,7 @@ async function downloadDriveFileToPath(args: {
   });
 }
 
-// jeve executable load (still need to update)
-function resolveJavaExecutable(): string {
-  const possiblePaths = [
-    process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, "bin", "java.exe"),
 
-    "C:\\Program Files\\Eclipse Adoptium\\jdk-21\\bin\\java.exe",
-    "C:\\Program Files\\Java\\jdk-21\\bin\\java.exe",
-  ];
-
-  for (const p of possiblePaths) {
-    if (p && fs.existsSync(p)) return p;
-  }
-
-  return "java"; // fallback
-}
 
 
 async function runWithConcurrency<T>(
@@ -1635,6 +1623,21 @@ async function runWithConcurrency<T>(
   await Promise.all(workers);
 }
 
+async function getLocalFileMD5(filePath: string): Promise<string | null> {
+  try {
+    await fs.promises.access(filePath); // Létezik egyáltalán?
+    return await new Promise((resolve, reject) => {
+      const hash = crypto.createHash("md5");
+      const stream = fs.createReadStream(filePath);
+      stream.on("error", (err) => reject(err));
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("end", () => resolve(hash.digest("hex")));
+    });
+  } catch {
+    return null; // Ha nincs meg a fájl, null-t ad vissza
+  }
+}
+
 // recursive folder donwload (full) ready for both paralel and queue
 async function downloadDriveFolderRecursive(args: {
   drive: any;
@@ -1645,9 +1648,10 @@ async function downloadDriveFolderRecursive(args: {
 
   await fs.promises.mkdir(localDestination, { recursive: true });
 
+  // ÚJÍTÁS: Itt lekérjük az 'md5Checksum'-ot is a Drive-ról!
   const res = await drive.files.list({
     q: `'${folderId}' in parents and trashed=false`,
-    fields: "files(id, name, mimeType)",
+    fields: "files(id, name, mimeType, md5Checksum)", 
     pageSize: 1000,
   });
 
@@ -1661,8 +1665,38 @@ async function downloadDriveFolderRecursive(args: {
     (file: any) => file.mimeType !== "application/vnd.google-apps.folder"
   );
 
+  // --- ÚJÍTÁS: LOKÁLIS SZEMÉT TAKARÍTÁSA ---
+  // Ha valami van a mappában, ami a Drive-on már nincs, töröljük.
+  try {
+    const localEntries = await fs.promises.readdir(localDestination, { withFileTypes: true });
+    const driveNames = new Set(files.map((f: any) => f.name));
+
+    for (const entry of localEntries) {
+      if (!driveNames.has(entry.name)) {
+        const absPath = path.join(localDestination, entry.name);
+        await fs.promises.rm(absPath, { recursive: true, force: true });
+        console.log(`[Smart Sync] Törölve (már nincs a Drive-on): ${entry.name}`);
+      }
+    }
+  } catch (err) {
+    // Ignoráljuk, ha a mappa korábban még nem is létezett
+  }
+  // -----------------------------------------
+
   await runWithConcurrency(normalFiles, 3, async (file: any) => {
     const targetPath = path.join(localDestination, file.name!);
+
+    // --- ÚJÍTÁS: HASH ELLENŐRZÉS (A varázslat) ---
+    const localMD5 = await getLocalFileMD5(targetPath);
+    const driveMD5 = file.md5Checksum;
+
+    if (localMD5 && driveMD5 && localMD5 === driveMD5) {
+      console.log(`[Smart Sync] Átugorva (Fájl változatlan): ${file.name}`);
+      return; // Ha egyezik az ujjlenyomat, KILÉPÜNK. Nem kell letölteni!
+    }
+
+    console.log(`[Smart Sync] Letöltés (Új vagy frissült): ${file.name}`);
+    // ---------------------------------------------
 
     await downloadDriveFileToPathWithRetry({
       drive,
@@ -1899,9 +1933,10 @@ async function detectForgeLaunch(extractPath: string): Promise<ForgeLaunchInfo |
 // installing forge
 async function runForgeInstaller(
   installerJarPath: string,
-  extractPath: string
+  extractPath: string,
+  mcVersion: string
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const javaExec = resolveJavaExecutable();
+  const javaExec = resolveJavaExecutable(mcVersion);
 
   return await new Promise((resolve, reject) => {
     const proc = spawn(
@@ -2029,7 +2064,7 @@ async function prepareForgeRuntime(
   const installerBuffer = await downloadFileToBuffer(installerUrl);
   await fs.promises.writeFile(installerJarPath, installerBuffer);
 
-  const installResult = await runForgeInstaller(installerJarPath, extractPath);
+  const installResult = await runForgeInstaller(installerJarPath, extractPath, mcVersion);
 
   if (installResult.code !== 0) {
     console.warn(
@@ -4220,6 +4255,7 @@ type RunningServer = {
   restartDelayMs: number;
   upnpStatus?: "idle" | "opening" | "mapped" | "failed" | "closing";
   upnpError?: string | null;
+  mcVersion: string;
 };
 
 const runningServers = new Map<string, RunningServer>();
@@ -4522,6 +4558,7 @@ type LaunchServerProcessArgs = {
   maxRestartAttempts?: number;
   restartDelayMs?: number;
   launchReason?: "manual" | "restart";
+  mcVersion: string;
 };
 
 function handleServerReadyFromLog(serverId: string, log: string) {
@@ -4551,6 +4588,7 @@ async function scheduleAutoRestart(args: {
   restartAttempts: number;
   maxRestartAttempts: number;
   restartDelayMs: number;
+  mcVersion: string;
 }) {
   const log = `[mc-server-manager] Crash detected. Restarting in ${Math.floor(
     args.restartDelayMs / 1000
@@ -4579,6 +4617,7 @@ async function scheduleAutoRestart(args: {
         maxRestartAttempts: args.maxRestartAttempts,
         restartDelayMs: args.restartDelayMs,
         launchReason: "restart",
+        mcVersion: args.mcVersion,
       });
     } catch (err: any) {
       const errLog = `[mc-server-manager] Auto-restart failed: ${err?.message || String(err)}\n`;
@@ -4608,6 +4647,7 @@ async function launchServerProcess({
   maxRestartAttempts = 3,
   restartDelayMs = 5000,
   launchReason = "manual",
+  mcVersion,
 }: LaunchServerProcessArgs): Promise<{ success: boolean; error?: string; port?: number }> {
   if (!serverId) {
     return { success: false, error: "Missing serverId" };
@@ -4649,7 +4689,7 @@ async function launchServerProcess({
     };
   }
 
-  const javaExec = resolveJavaExecutable();
+  const javaExec = resolveJavaExecutable(mcVersion);
   let args: string[] = [];
 
   if (launchMode === "forge-args") {
@@ -4761,6 +4801,7 @@ async function launchServerProcess({
         restartAttempts: current.restartAttempts + 1,
         maxRestartAttempts: current.maxRestartAttempts,
         restartDelayMs: current.restartDelayMs,
+        mcVersion: current.mcVersion,
       }
       : null;
 
@@ -4819,6 +4860,7 @@ async function launchServerProcess({
     restartDelayMs,
     upnpStatus: "idle",
     upnpError: null,
+    mcVersion: mcVersion,
   });
 
   emitServerState(serverId);
@@ -4893,6 +4935,7 @@ ipcMain.handle(
       serverFolder,
       ram,
       preferredPort,
+      mcVersion,
     }: {
       serverId: string;
       pathToServerJar?: string | null;
@@ -4903,6 +4946,7 @@ ipcMain.handle(
       serverFolder?: string | null;
       ram: string;
       preferredPort?: number;
+      mcVersion: string; // <--- Újra kötelező (nincs kérdőjel)
     }
   ) => {
     try {
@@ -4921,6 +4965,7 @@ ipcMain.handle(
         maxRestartAttempts: 3,
         restartDelayMs: 5000,
         launchReason: "manual",
+        mcVersion, // <--- Közvetlenül megy be a scannerhez!
       });
     } catch (error: any) {
       return { success: false, error: error.message || String(error) };

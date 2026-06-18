@@ -289,6 +289,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverFolder?: string | null;
     ram: string;
     preferredPort?: number;
+    mcVersion?: string;
   }) => ipcRenderer.invoke("startServerProcess", params),
 
   stopServerProcess: (params: { serverId: string }) =>
