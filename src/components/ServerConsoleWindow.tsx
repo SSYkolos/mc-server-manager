@@ -9,6 +9,7 @@ import { getAuth } from "firebase/auth";
 import { db } from "../firebase";
 import ServerPropertiesEditor from "./ServerPropertiesEditor";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import WebRTCHost from './WebRTCHost';
 
 
 type RouteParams = {
@@ -531,6 +532,9 @@ export default function ServerConsoleWindow() {
                 <Typography variant="body2">PID: {pid ?? "-"}</Typography>
                 <Typography variant="body2">RAM: {ram || "-"}</Typography>
                 <Typography variant="body2">Uptime: {formatUptime(uptimeSec)}</Typography>
+
+                {/* WebRTC host */}
+                <WebRTCHost serverId={serverId} serverRunning={serverRunning} />
               </Box>
 
               <Typography

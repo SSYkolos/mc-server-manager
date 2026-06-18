@@ -96,6 +96,7 @@
     "react-icons": "^5.5.0",
     "react-router-dom": "^7.6.2",
     "react-scripts": "^5.0.1",
+    "simple-peer": "^9.11.1",
     "tailwind-merge": "^3.3.1",
     "tailwind-variants": "^1.0.0",
     "unzipper": "^0.12.3"
@@ -112,6 +113,7 @@
     "@types/path-browserify": "^1.0.3",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/simple-peer": "^9.11.9",
     "@types/unzipper": "^0.10.11",
     "autoprefixer": "^10.4.17",
     "concurrently": "^8.2.2",

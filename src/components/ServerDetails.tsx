@@ -21,6 +21,7 @@ import { User } from "firebase/auth";
 import InviteUser from "./InviteUser";
 import { MoreVertical } from "lucide-react";
 import HostServer from "./HostServer";
+import RemoteConsoleView from './RemoteConsoleView';
 
 
 type ModSideSupport = "server" | "client" | "both" | "optional" | "unknown";
@@ -73,6 +74,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showHostModal, setShowHostModal] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const [isLocalHost, setIsLocalHost] = useState(false);
 
   const [showRoleWarning, setShowRoleWarning] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
@@ -694,7 +696,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
 
       // 2. Pull isModpack from INSIDE serverData!
       const isModpack = serverData?.isModpack || false;
-      
+
       // 3. Intercept the folder name
       const driveCategoryFolder = isModpack ? "modpack" : loader;
 
@@ -1041,8 +1043,10 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       const serverData = serverDoc.exists() ? serverDoc.data() : null;
       const liveInfo = serverData?.liveInfo ?? null;
 
+      // 1. Is it running on THIS physical machine?
       if (runtimeInfo.success && runtimeInfo.running && runtimeInfo.data) {
         setServerHosted(true);
+        setIsLocalHost(true); // <--- ADD THIS
         setExtractPath(runtimeInfo.data.extractPath);
         setRam(runtimeInfo.data.ram);
         setRuntimeState(runtimeInfo.data.state || "running");
@@ -1052,8 +1056,10 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
         return;
       }
 
+      // 2. Is it running on someone ELSE's machine remotely?
       if (liveInfo) {
         setServerHosted(true);
+        setIsLocalHost(false); // <--- ADD THIS
         setRuntimeState("running");
         setRuntimePort(typeof liveInfo.port === "number" ? liveInfo.port : null);
         setUpnpStatus("idle");
@@ -1061,7 +1067,9 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
         return;
       }
 
+      // 3. It's totally offline
       setServerHosted(false);
+      setIsLocalHost(false); // <--- ADD THIS
       setRuntimeState("stopped");
       setRuntimePort(null);
       setUpnpStatus("idle");
@@ -1388,14 +1396,25 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
               disabled={!serverHosted}
               onClick={() => {
                 if (!serverHosted) return;
-                handleOpenDetachedConsole();
+
+                if (isLocalHost) {
+                  // Open the native Electron window for the actual Host!
+                  handleOpenDetachedConsole();
+                } else {
+                  // Toggle the WebRTC viewer for remote Admins!
+                  setShowConsole((prev) => !prev);
+                }
               }}
               className={`px-3 py-2 rounded text-white ${serverHosted
-                ? "bg-purple-600 hover:bg-purple-700"
-                : "bg-gray-400 cursor-not-allowed"
+                  ? "bg-purple-600 hover:bg-purple-700"
+                  : "bg-gray-400 cursor-not-allowed"
                 }`}
             >
-              Server Console
+              {isLocalHost
+                ? "Server Console" // Always says this for the Host
+                : showConsole
+                  ? "Close Console" // Toggles text for remote admins
+                  : "Server Console"}
             </button>
 
             <button
@@ -1511,6 +1530,18 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
 
 
         <InviteUser serverId={serverId} onUserInvited={onUserInvited} />
+
+        {/* --- INJECT WEBRTC REMOTE CONSOLE HERE --- */}
+        {showConsole && serverHosted && !isLocalHost && (
+          <div className="mb-6 border border-gray-700 rounded overflow-hidden shadow-lg h-[600px]">
+             {/* No longer need the old header, the component brings its own! */}
+            <RemoteConsoleView 
+               serverId={serverId} 
+               onClose={() => setShowConsole(false)} 
+            />
+          </div>
+        )}
+        {/* ----------------------------------------- */}
 
         <div ref={menuRef}>
           <h3 className="font-semibold mb-3">Users</h3>
