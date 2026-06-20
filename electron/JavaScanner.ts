@@ -7,17 +7,38 @@ let javaCache: Record<number, string> = {};
 
 // Maps Minecraft versions to required Java versions
 function getRequiredJavaMajorVersion(mcVersion: string): number {
-  if (!mcVersion) return 17; // Fallback
+  if (!mcVersion) return 21; // Fallback
 
-  const parts = mcVersion.split(".");
-  const minor = parseInt(parts[1], 10);
-  const patch = parts.length > 2 ? parseInt(parts[2], 10) : 0;
+  try {
+    // 1. Normalize the string by removing any "1." prefix if it exists
+    // "1.26.2" becomes "26.2". "26.2" remains "26.2".
+    let normalized = mcVersion.trim();
+    if (normalized.startsWith("1.")) {
+      normalized = normalized.substring(2);
+    }
 
-  if (minor <= 12) return 8;  // 1.12.2 and older -> Java 8
-  if (minor <= 16) return 11; // 1.16.5 -> Java 11
-  if (minor === 17) return 16;// 1.17.1 -> Java 16
-  if (minor < 20 || (minor === 20 && patch < 5)) return 17; // 1.18 to 1.20.4 -> Java 17
-  return 21; // 1.20.5+ -> Java 21
+    // 2. Extract the main version number (the minor version in MC terms)
+    const match = normalized.match(/^(\d+)/);
+    
+    if (!match) {
+      console.warn(`[Java Scanner] Furcsa MC verzió kapva: "${mcVersion}". Feltételezzük, hogy modern (Java 25).`);
+      return 25; // Default to the latest Java if we can't parse it
+    }
+
+    const minor = parseInt(match[1], 10);
+
+    // 3. Map to the correct Java version
+    if (minor <= 12) return 8;  // 1.12.2 and older
+    if (minor <= 16) return 11; // 1.16.5
+    if (minor === 17) return 16;// 1.17.1
+    if (minor <= 20) return 17; // 1.18 - 1.20.4
+    if (minor <= 24) return 21; // 1.20.5 - 1.24.x
+    return 25;                  // 1.25+ and 1.26.x (The present day!)
+    
+  } catch (e) {
+    console.error(`[Java Scanner] Failed to parse mcVersion "${mcVersion}"`, e);
+    return 25;
+  }
 }
 
 function scanForJava(): Record<number, string> {

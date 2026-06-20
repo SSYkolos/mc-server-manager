@@ -121,6 +121,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverId: string;
     loader: string;
     folderName: "mods" | "mods-disabled" | "config" | "plugins";
+    driveFolderId?: string; // <--- ÚJ
+    isModpack?: boolean;    // <--- ÚJ
   }) => ipcRenderer.invoke("list-drive-folder-files", args),
 
   moveDriveFileBetweenServerFolders: (args: {

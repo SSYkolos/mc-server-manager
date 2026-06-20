@@ -293,6 +293,8 @@ declare global {
         serverId: string;
         loader: string;
         folderName: "mods" | "mods-disabled" | "config" | "plugins";
+        driveFolderId?: string; // <--- ÚJ
+        isModpack?: boolean;    // <--- ÚJ
       }) => Promise<{
         success: boolean;
         files?: {

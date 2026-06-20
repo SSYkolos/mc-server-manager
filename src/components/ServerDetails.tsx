@@ -627,12 +627,16 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
           serverId,
           loader,
           folderName: "mods",
+          driveFolderId: currentServer?.driveFolderId,
+          isModpack: currentServer?.isModpack,
         }),
         window.electronAPI.listDriveFolderFiles({
           accessToken,
           serverId,
           loader,
           folderName: "mods-disabled",
+          driveFolderId: currentServer?.driveFolderId,
+          isModpack: currentServer?.isModpack,
         }),
       ]);
 
@@ -934,18 +938,35 @@ async function handleJoin() {
   }
 
   async function getServerDriveContext() {
-    if (!currentServer) throw new Error("Server not found in cache");
+    if (!currentServer) {
+      throw new Error("Server not found in cache");
+    }
+
     const linkedDriveId = currentServer.linkedDriveId;
     const createdBy = currentServer.createdBy;
-    const loader = currentServer.loader || "vanilla";
+    const rawLoader = currentServer.loader || "vanilla";
 
-    if (!linkedDriveId || !createdBy) throw new Error("Drive is not linked for this server.");
+    if (!linkedDriveId || !createdBy) {
+      throw new Error("Drive is not linked for this server.");
+    }
 
     const accessToken = await window.electronAPI.getValidAccessToken({
       userId: createdBy,
       driveId: linkedDriveId,
     });
-    return { linkedDriveId, createdBy, loader, accessToken, serverData: currentServer };
+
+    // 🔥 THE FIX: If this is a modpack, lie to the functions and tell them 
+    // the loader is literally named "modpack". This routes ALL Google Drive
+    // requests to the correct folder!
+    const loader = currentServer.isModpack ? "modpack" : rawLoader;
+
+    return {
+      linkedDriveId,
+      createdBy,
+      loader, 
+      accessToken,
+      serverData: currentServer
+    };
   }
 
   async function handleJoinServer() {

@@ -2702,14 +2702,18 @@ ipcMain.handle("download-mods-to-folder", async (_event, args) => {
 // lists all children
 ipcMain.handle("list-drive-folder-files", async (_event, args) => {
   try {
-    const { accessToken, serverId, loader, folderName } = args;
+    // 1. ADD driveFolderId and isModpack to args
+    const { accessToken, serverId, loader, folderName, driveFolderId, isModpack } = args;
 
     const drive = createDriveClient(accessToken);
 
+    // 2. Pass them into the function so it executes instantly!
     const serverRootId = await ensureDriveFolderPath({
       accessToken,
       serverId,
       loader,
+      driveFolderId, 
+      isModpack
     });
 
     const folderId = await findChildFolderId(drive, serverRootId, folderName);
