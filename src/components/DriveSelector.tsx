@@ -1,9 +1,7 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { db, auth } from "../firebase";
+import React, { useState } from "react";
+import { auth } from "../firebase";
 import { useAuthState } from "react-firebase-hooks/auth";
-import { doc, getDoc } from "firebase/firestore";
-import type { DriveInfo } from "../types/types";
-
+import { useServerData } from "../ServerDataContext"; // <--- Az Agy importálása
 
 export default function DriveSelector({
   onSelect,
@@ -13,39 +11,19 @@ export default function DriveSelector({
   initialDriveId?: string;
 }) {
   const [user] = useAuthState(auth);
-  const [drives, setDrives] = useState<DriveInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  
+  // KÉRJÜK KI AZ ADATOT A RAM-BÓL (0 extra olvasás)
+  const { drives: rawDrives, loading } = useServerData();
+
   const [selectedDrive, setSelectedDrive] = useState<string | undefined>(
     initialDriveId
   );
 
-  const loadDrives = useCallback(async () => {
-    if (!user) return;
-
-    try {
-      const userRef = doc(db, "users", user.uid);
-      const userSnap = await getDoc(userRef);
-
-      if (userSnap.exists()) {
-        const data = userSnap.data();
-
-        const driveList: DriveInfo[] = (data.drives || []).map((drive: any, index: number) => ({
-          id: drive.driveId || String(index),
-          displayName: drive.driveEmail || `Drive ${index + 1}`,
-        }));
-
-        setDrives(driveList);
-      }
-    } catch (err) {
-      console.error("Error loading drives:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
-
-  useEffect(() => {
-    loadDrives();
-  }, [loadDrives]);
+  // Formázzuk a memóriából kapott adatot a dropdown számára
+  const formattedDrives = rawDrives.map((drive: any, index: number) => ({
+    id: drive.driveId || String(index),
+    displayName: drive.driveEmail || `Drive ${index + 1}`,
+  }));
 
   const handleSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
@@ -53,25 +31,23 @@ export default function DriveSelector({
     onSelect(val);
   };
 
-const handleLinkNewDrive = async () => {
-  if (!user) return;
+  const handleLinkNewDrive = async () => {
+    if (!user) return;
 
-  try {
-    // ✅ call the NEW ipcMain handler you created: "link-drive"
-    // it should do OAuth in main and send tokens to backend itself
-    const result = await window.electronAPI.linkDrive({
-      uid: user.uid,
-      serverId: undefined, // or your selected server id if you have it
-    });
+    try {
+      const result = await window.electronAPI.linkDrive({
+        uid: user.uid,
+        serverId: undefined, 
+      });
 
-    if (!result?.success) throw new Error(result?.error || "Link failed");
+      if (!result?.success) throw new Error(result?.error || "Link failed");
 
-    alert("Drive linked successfully!");
-    loadDrives();
-  } catch (err: any) {
-    alert("OAuth failed: " + err.message);
-  }
-};
+      alert("Drive linked successfully!");
+      // NINCS loadDrives() hívás! A Firebase frissül, az Agy észreveszi, a dropdown azonnal megjeleníti!
+    } catch (err: any) {
+      alert("OAuth failed: " + err.message);
+    }
+  };
 
   return (
     <div className="space-y-2">
@@ -79,7 +55,7 @@ const handleLinkNewDrive = async () => {
 
       {loading ? (
         <p>🔄 Loading drives...</p>
-      ) : drives.length === 0 ? (
+      ) : formattedDrives.length === 0 ? (
         <p className="text-sm text-gray-500">
           ⚠️ No linked drives yet. Please link a new Google Drive.
         </p>
@@ -91,7 +67,7 @@ const handleLinkNewDrive = async () => {
           disabled={loading}
         >
           <option value="">Select a drive</option>
-          {drives.map((d) => (
+          {formattedDrives.map((d) => (
             <option key={d.id} value={d.id}>
               {d.displayName}
             </option>

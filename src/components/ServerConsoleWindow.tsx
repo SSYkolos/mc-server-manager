@@ -11,7 +11,6 @@ import ServerPropertiesEditor from "./ServerPropertiesEditor";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import WebRTCHost from './WebRTCHost';
 
-
 type RouteParams = {
   serverId?: string;
   role?: string;
@@ -54,8 +53,8 @@ export default function ServerConsoleWindow() {
   const initialExtractPath = query.get("extractPath") || "";
   const initialRam = query.get("ram") || "4G";
   const initialMcVersion = query.get("mcVersion") || "";
-  const initialIsAdmin = query.get("isAdmin") === "true";
   const initialAccessToken = query.get("accessToken") || "";
+  
   const [runtimeState, setRuntimeState] = useState<string>("stopped");
   const [logs, setLogs] = useState<string[]>([]);
 
@@ -136,7 +135,6 @@ export default function ServerConsoleWindow() {
           setPid(runtimeInfo.data.pid);
           setStartedAt(runtimeInfo.data.startedAt);
         } else {
-
           setRuntimeState("stopped");
           setServerRunning(false);
           if (initialExtractPath) setExtractPath(initialExtractPath);
@@ -278,8 +276,6 @@ export default function ServerConsoleWindow() {
     logEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [logs]);
 
-
-
   const sendCommand = async () => {
     if (!serverId || !command.trim() || !serverRunning) return;
 
@@ -407,7 +403,7 @@ export default function ServerConsoleWindow() {
 
       const serverData = serverSnap.data();
       const loader = serverData?.loader || "vanilla";
-      const loaderVersion = serverData?.loaderVersion || "";
+      // const loaderVersion = serverData?.loaderVersion || ""; // Removed if unused!
 
       const runtimeInfo = await window.electronAPI.detectPreparedServerRuntime({
         loader,
@@ -447,7 +443,7 @@ export default function ServerConsoleWindow() {
 
       await updateDoc(serverRef, {
         liveInfo: {
-          hostUserId: serverData.createdBy || currentUser?.uid || null,
+          hostUserId: serverData?.createdBy || currentUser?.uid || null,
           ip: publicIp,
           port: result.port ?? 25565,
           status: "online",
@@ -459,7 +455,6 @@ export default function ServerConsoleWindow() {
       alert(err?.message || "Failed to start server.");
     }
   };
-
 
   const handleStop = async () => {
     if (!serverId) return;
@@ -473,8 +468,6 @@ export default function ServerConsoleWindow() {
 
     setRuntimeState("stopping");
   };
-
-
 
   if (!serverId) {
     return (

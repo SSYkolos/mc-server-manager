@@ -21,8 +21,7 @@ import { User } from "firebase/auth";
 import InviteUser from "./InviteUser";
 import { MoreVertical } from "lucide-react";
 import HostServer from "./HostServer";
-import RemoteConsoleView from './RemoteConsoleView';
-
+import { useServerData } from "../ServerDataContext";
 
 type ModSideSupport = "server" | "client" | "both" | "optional" | "unknown";
 
@@ -63,13 +62,22 @@ type ServerMod = {
 };
 
 export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
-  const [users, setUsers] = useState<ServerUser[]>([]);
-  const [serverName, setServerName] = useState<string>("");
-  const [serverOwnerId, setServerOwnerId] = useState<string>("");
-  const [userRole, setUserRole] = useState<Role | "">("");
+  // 🧠 1. GRAB SERVER AND INVITES FROM THE BRAIN (0 extra reads!)
+  const { servers, invites } = useServerData();
+  const currentServer = servers.find((s) => s.id === serverId);
+
+  // 🧠 2. DERIVED VARIABLES (These replace your old useStates)
+  const serverName = currentServer?.name || "Loading...";
+  const serverOwnerId = currentServer?.createdBy || "";
+  const userRole = currentServer?.users?.[user.uid]?.role || "";
+  const serverLoader = currentServer?.loader || "vanilla";
+  const isAdmin = userRole === "owner" || userRole === "admin";
+  const invited = invites.some((inv) => inv.id === serverId); // Instantly check invites
+
+  // 3. KEEP THE REST OF YOUR STATES
+  const [users, setUsers] = useState<ServerUser[]>([]); 
   const [error, setError] = useState<string>("");
   const [joining, setJoining] = useState(false);
-  const [invited, setInvited] = useState(false);
   const [inviteActionLoading, setInviteActionLoading] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showHostModal, setShowHostModal] = useState(false);
@@ -82,8 +90,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [mcVersion, setMcVersion] = useState<string | null>(null);
   const [extractPath, setExtractPath] = useState("");
   const [serverHosted, setServerHosted] = useState(false);
-  const [serverLoader, setServerLoader] = useState<string>("vanilla");
-
 
   const [modsSearch, setModsSearch] = useState("");
   const [showModsPanel, setShowModsPanel] = useState(false);
@@ -96,7 +102,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [modsTogglingId, setModsTogglingId] = useState<string | null>(null);
   const [modsError, setModsError] = useState("");
   const [modsNotice, setModsNotice] = useState("");
-  const isAdmin = userRole === "owner" || userRole === "admin";
 
   const [discoverQuery, setDiscoverQuery] = useState("");
   const [discoverProvider, setDiscoverProvider] = useState<"modrinth" | "curseforge">("modrinth");
@@ -110,9 +115,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [publicIp, setPublicIp] = useState<string>("");
   const [upnpStatus, setUpnpStatus] = useState<string>("idle");
   const [upnpError, setUpnpError] = useState<string>("");
-  const [reachability, setReachability] = useState<
-    "idle" | "checking" | "reachable" | "blocked"
-  >("idle");
+  const [reachability, setReachability] = useState<"idle" | "checking" | "reachable" | "blocked">("idle");
 
   const enabledModsCount = useMemo(
     () => mods.filter((mod) => mod.enabled).length,
@@ -222,87 +225,13 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     }
   }
 
-  async function handleJoinServer() {
-    if (!user) {
-      alert("You must be logged in to join.");
-      return;
-    }
 
-    setJoining(true);
-
-    try {
-      const serverDoc = await getDoc(doc(db, "servers", serverId));
-      if (!serverDoc.exists()) {
-        setError("Server not found");
-        setJoining(false);
-        return;
-      }
-
-      const serverData = serverDoc.data();
-
-      if (!serverData?.liveInfo) {
-        alert("Server is not currently online.");
-        setJoining(false);
-        return;
-      }
-
-      const { ip, port } = serverData.liveInfo;
-      const loader = serverData.loader || "vanilla";
-      const version = serverData.mcVersion || "1.20.1";
-
-      // 1️⃣ Try opening the Minecraft link
-      const mcLink = `minecraft://${ip}:${port}`;
-      window.open(mcLink);
-
-      // 2️⃣ Always copy server info to clipboard
-      const clipboardText = `Server IP: ${ip}\nPort: ${port}\nLoader: ${loader || "vanilla"}\nVersion: ${version}`;
-      await navigator.clipboard.writeText(clipboardText);
-
-      alert("Server info copied to clipboard! You can paste it into any client (MultiMC, Vanilla, etc).");
-
-
-
-      await fetchServerUsers();
-    } catch (err) {
-      console.error(err);
-      setError("Failed to join server.");
-    }
-
-    setJoining(false);
-  }
 
   function handleToggleModsPanel() {
     setShowModsPanel((prev) => !prev);
   }
 
-  async function getServerDriveContext() {
-    const serverDoc = await getDoc(doc(db, "servers", serverId));
-    if (!serverDoc.exists()) {
-      throw new Error("Server not found");
-    }
-
-    const serverData = serverDoc.data();
-    const linkedDriveId = serverData.linkedDriveId;
-    const createdBy = serverData.createdBy;
-    const loader = serverData.loader || "vanilla";
-
-    if (!linkedDriveId || !createdBy) {
-      throw new Error("Drive is not linked for this server.");
-    }
-
-    const accessToken = await window.electronAPI.getValidAccessToken({
-      userId: createdBy,
-      driveId: linkedDriveId,
-    });
-
-    return {
-      serverData,
-      linkedDriveId,
-      createdBy,
-      loader,
-      accessToken,
-    };
-  }
+ 
 
   async function handleOpenOwnerWindow() {
     try {
@@ -690,29 +619,19 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       setModsError("");
       setModsNotice("");
 
-      // 1. Grab the whole context object
-      const driveContext = await getServerDriveContext();
-      const { accessToken, loader, serverData } = driveContext;
-
-      // 2. Pull isModpack from INSIDE serverData!
-      const isModpack = serverData?.isModpack || false;
-
-      // 3. Intercept the folder name
-      const driveCategoryFolder = isModpack ? "modpack" : loader;
-
-      console.log(`[Sync] Intercept active: isModpack=${isModpack} -> Looking in '${driveCategoryFolder}' folder.`);
+      const { accessToken, loader } = await getServerDriveContext();
 
       const [enabledResult, disabledResult] = await Promise.all([
         window.electronAPI.listDriveFolderFiles({
           accessToken,
           serverId,
-          loader: driveCategoryFolder,
+          loader,
           folderName: "mods",
         }),
         window.electronAPI.listDriveFolderFiles({
           accessToken,
           serverId,
-          loader: driveCategoryFolder,
+          loader,
           folderName: "mods-disabled",
         }),
       ]);
@@ -898,63 +817,36 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     }
   }
 
-  async function fetchServerUsers() {
-    try {
-      const serverDoc = await getDoc(doc(db, "servers", serverId));
-      if (!serverDoc.exists()) {
-        setError("Server not found");
-        return;
-      }
+// 🧠 REWRITTEN USERNAME FETCHER (Powered by the Brain)
+  useEffect(() => {
+    async function resolveUsernames() {
+      if (!currentServer?.users) return;
 
-      const serverData = serverDoc.data();
-      if (!serverData || !serverData.users || !serverData.users[user.uid]) {
-        setError("You are not a member of this server.");
-        setJoining(false);
-        return;
-      }
-
-      setServerName(serverData.name);
-      setServerOwnerId(serverData.createdBy);
-      setServerLoader(serverData.loader || "vanilla");
-      setMcVersion(serverData.mcVersion || null);
-      setRam(serverData.ram || null);
-
-      const userEntries = Object.entries(serverData.users || {}) as [string, { role: string; lastJoined?: any }][];
+      const userEntries = Object.entries(currentServer.users) as [string, any][];
       const usersList: ServerUser[] = [];
 
       for (const [uid, userInfo] of userEntries) {
+        // Only fetch the username profile, the rest is in memory!
         const userDoc = await getDoc(doc(db, "readableUsers", uid));
         const mcUsername = userDoc.exists() ? userDoc.data()?.mcUsername || "Unknown" : "Unknown";
-
-        const role = userInfo.role as Role;
-        if (uid === user.uid) {
-          setUserRole(role);
-        }
 
         usersList.push({
           id: uid,
           mcUsername,
-          role,
+          role: userInfo.role as Role,
           lastJoined: userInfo.lastJoined,
         });
       }
 
       setUsers(usersList);
-    } catch (err) {
-      setError("Failed to load server users");
+      
+      // Initialize these if they haven't been set yet
+      if (!mcVersion && currentServer.mcVersion) setMcVersion(currentServer.mcVersion);
+      if (!ram && currentServer.ram) setRam(currentServer.ram);
     }
-  }
 
-  async function checkInvite() {
-    const readableUserDoc = await getDoc(doc(db, "readableUsers", user.uid));
-    const invites = readableUserDoc.data()?.invites || [];
-    setInvited(invites.includes(serverId));
-  }
-
-  useEffect(() => {
-    fetchServerUsers();
-    checkInvite();
-  }, [serverId, user.uid]);
+    resolveUsernames();
+  }, [currentServer?.users]); // Only re-runs if the user list changes in the DB
 
   useEffect(() => {
     if (!modsNotice) return;
@@ -966,39 +858,21 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     return () => window.clearTimeout(timeout);
   }, [modsNotice]);
 
-  async function handleJoin() {
-    if (!user) {
-      alert("You must be logged in to join.");
-      return;
-    }
-
+async function handleJoin() {
+    if (!user) return alert("You must be logged in to join.");
     setJoining(true);
-
     try {
-      const serverDoc = await getDoc(doc(db, "servers", serverId));
-      const serverData = serverDoc.data();
-      if (!serverData) {
-        setError("Server data not found.");
-        setJoining(false);
-        return;
+      if (!currentServer) throw new Error("Server data not found.");
+      if (!currentServer.users || !currentServer.users[user.uid]) {
+        throw new Error("You are not a member of this server.");
       }
-
-
-      if (!serverData.users || !serverData.users[user.uid]) {
-        setError("You are not a member of this server.");
-        setJoining(false);
-        return;
-      }
-
       await updateDoc(doc(db, "servers", serverId), {
         [`users.${user.uid}.lastJoined`]: serverTimestamp(),
       });
-
-      await fetchServerUsers();
-    } catch (error) {
-      setError("Failed to join server");
+      // ❌ DELETED fetchServerUsers() because Brain handles it!
+    } catch (error: any) {
+      setError(error.message || "Failed to join server");
     }
-
     setJoining(false);
   }
 
@@ -1010,43 +884,24 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       const readableRef = doc(db, "readableUsers", user.uid);
 
       await updateDoc(serverRef, {
-        [`users.${user.uid}`]: {
-          role: "member",
-          lastJoined: serverTimestamp(),
-        },
+        [`users.${user.uid}`]: { role: "member", lastJoined: serverTimestamp() },
       });
-
-      await updateDoc(userRef, {
-        servers: arrayUnion(serverId),
-      });
-
-      await updateDoc(readableRef, {
-        invites: arrayRemove(serverId),
-      });
-
-      await fetchServerUsers();
-      setInvited(false);
+      await updateDoc(userRef, { servers: arrayUnion(serverId) });
+      await updateDoc(readableRef, { invites: arrayRemove(serverId) });
     } catch (err) {
       setError("Failed to accept invite");
     }
     setInviteActionLoading(false);
   }
 
-
   async function fetchServerHostStatus() {
     try {
-      const [runtimeInfo, serverDoc] = await Promise.all([
-        window.electronAPI.getRunningServerInfo({ serverId }),
-        getDoc(doc(db, "servers", serverId)),
-      ]);
+      const runtimeInfo = await window.electronAPI.getRunningServerInfo({ serverId });
+      const liveInfo = currentServer?.liveInfo ?? null; // 🧠 Pulled from Brain
 
-      const serverData = serverDoc.exists() ? serverDoc.data() : null;
-      const liveInfo = serverData?.liveInfo ?? null;
-
-      // 1. Is it running on THIS physical machine?
       if (runtimeInfo.success && runtimeInfo.running && runtimeInfo.data) {
         setServerHosted(true);
-        setIsLocalHost(true); // <--- ADD THIS
+        setIsLocalHost(true);
         setExtractPath(runtimeInfo.data.extractPath);
         setRam(runtimeInfo.data.ram);
         setRuntimeState(runtimeInfo.data.state || "running");
@@ -1056,10 +911,9 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
         return;
       }
 
-      // 2. Is it running on someone ELSE's machine remotely?
       if (liveInfo) {
         setServerHosted(true);
-        setIsLocalHost(false); // <--- ADD THIS
+        setIsLocalHost(false); 
         setRuntimeState("running");
         setRuntimePort(typeof liveInfo.port === "number" ? liveInfo.port : null);
         setUpnpStatus("idle");
@@ -1067,9 +921,8 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
         return;
       }
 
-      // 3. It's totally offline
       setServerHosted(false);
-      setIsLocalHost(false); // <--- ADD THIS
+      setIsLocalHost(false);
       setRuntimeState("stopped");
       setRuntimePort(null);
       setUpnpStatus("idle");
@@ -1079,6 +932,44 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       console.error("Failed to fetch host status", err);
     }
   }
+
+  async function getServerDriveContext() {
+    if (!currentServer) throw new Error("Server not found in cache");
+    const linkedDriveId = currentServer.linkedDriveId;
+    const createdBy = currentServer.createdBy;
+    const loader = currentServer.loader || "vanilla";
+
+    if (!linkedDriveId || !createdBy) throw new Error("Drive is not linked for this server.");
+
+    const accessToken = await window.electronAPI.getValidAccessToken({
+      userId: createdBy,
+      driveId: linkedDriveId,
+    });
+    return { linkedDriveId, createdBy, loader, accessToken, serverData: currentServer };
+  }
+
+  async function handleJoinServer() {
+    if (!user) return alert("You must be logged in to join."); 
+    setJoining(true);
+    try {
+      if (!currentServer) { setError("Server not found"); setJoining(false); return; }
+      if (!currentServer.liveInfo) { alert("Server is not currently online."); setJoining(false); return; }
+
+      const { ip, port } = currentServer.liveInfo;
+      const loader = currentServer.loader || "vanilla";
+      const version = currentServer.mcVersion || "1.20.1";
+
+      window.open(`minecraft://${ip}:${port}`);
+      await navigator.clipboard.writeText(`Server IP: ${ip}\nPort: ${port}\nLoader: ${loader}\nVersion: ${version}`);
+      alert("Server info copied to clipboard! You can paste it into any client.");
+    } catch (err) {
+      console.error(err);
+      setError("Failed to join server.");
+    }
+    setJoining(false);
+  }
+
+
 
   useEffect(() => {
     let cancelled = false;
@@ -1253,7 +1144,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       await updateDoc(readableRef, {
         invites: arrayRemove(serverId),
       });
-      setInvited(false);
     } catch (err) {
       setError("Failed to decline invite");
     }
@@ -1265,7 +1155,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       [`users.${userId}.role`]: "admin",
     });
     setOpenMenuId(null);
-    await fetchServerUsers();
   }
 
   async function demoteToMember(userId: string) {
@@ -1273,7 +1162,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       [`users.${userId}.role`]: "member",
     });
     setOpenMenuId(null);
-    await fetchServerUsers();
   }
 
 
@@ -1311,7 +1199,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       servers: arrayRemove(serverId),
     });
     setOpenMenuId(null);
-    await fetchServerUsers();
   }
 
   function canManageUsers() {
@@ -1319,7 +1206,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   }
 
   function onUserInvited() {
-    fetchServerUsers();
   }
 
   if (error) return <p className="text-red-600">{error}</p>;
@@ -1363,7 +1249,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
                 className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
               >
                 {inviteActionLoading ? "Declining..." : "Decline"}
-              </button>
+              </button> 
             </div>
           </div>
         )}
@@ -1396,25 +1282,14 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
               disabled={!serverHosted}
               onClick={() => {
                 if (!serverHosted) return;
-
-                if (isLocalHost) {
-                  // Open the native Electron window for the actual Host!
-                  handleOpenDetachedConsole();
-                } else {
-                  // Toggle the WebRTC viewer for remote Admins!
-                  setShowConsole((prev) => !prev);
-                }
+                handleOpenDetachedConsole();
               }}
               className={`px-3 py-2 rounded text-white ${serverHosted
-                  ? "bg-purple-600 hover:bg-purple-700"
-                  : "bg-gray-400 cursor-not-allowed"
+                ? "bg-purple-600 hover:bg-purple-700"
+                : "bg-gray-400 cursor-not-allowed"
                 }`}
             >
-              {isLocalHost
-                ? "Server Console" // Always says this for the Host
-                : showConsole
-                  ? "Close Console" // Toggles text for remote admins
-                  : "Server Console"}
+              Server Console
             </button>
 
             <button
@@ -1530,18 +1405,6 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
 
 
         <InviteUser serverId={serverId} onUserInvited={onUserInvited} />
-
-        {/* --- INJECT WEBRTC REMOTE CONSOLE HERE --- */}
-        {showConsole && serverHosted && !isLocalHost && (
-          <div className="mb-6 border border-gray-700 rounded overflow-hidden shadow-lg h-[600px]">
-             {/* No longer need the old header, the component brings its own! */}
-            <RemoteConsoleView 
-               serverId={serverId} 
-               onClose={() => setShowConsole(false)} 
-            />
-          </div>
-        )}
-        {/* ----------------------------------------- */}
 
         <div ref={menuRef}>
           <h3 className="font-semibold mb-3">Users</h3>

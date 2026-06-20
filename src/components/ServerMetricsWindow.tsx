@@ -13,6 +13,7 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
+import { useServerData } from "../ServerDataContext";
 
 type MetricRow = {
   serverId: string;
@@ -415,6 +416,7 @@ function ChartPanel({
 }
 
 export default function ServerMetricsWindow() {
+  const { servers: cachedServers } = useServerData();
   const [servers, setServers] = useState<MetricRow[]>([]);
   const [history, setHistory] = useState<ServerHistoryMap>({});
   const [serverNames, setServerNames] = useState<ServerNameMap>({});
@@ -441,18 +443,12 @@ export default function ServerMetricsWindow() {
           .filter((id) => !serverNames[id]);
 
         if (missingIds.length > 0) {
-          const entries = await Promise.all(
-            missingIds.map(async (serverId) => {
-              try {
-                const snap = await getDoc(doc(db, "servers", serverId));
-                if (!snap.exists()) return [serverId, serverId] as const;
-                const data = snap.data() as { name?: string; serverName?: string };
-                return [serverId, data.name || data.serverName || serverId] as const;
-              } catch {
-                return [serverId, serverId] as const;
-              }
-            })
-          );
+          const entries = missingIds.map((serverId) => {
+            // Firestore hívás helyett a memóriából (cachedServers) keressük ki a nevet!
+            const foundServer = cachedServers.find(s => s.id === serverId);
+            const serverName = foundServer?.name || serverId; 
+            return [serverId, serverName] as const;
+          });
 
           if (mounted) {
             setServerNames((prev) => {

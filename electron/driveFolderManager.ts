@@ -100,27 +100,35 @@ export async function ensureDriveFolderPath({
 
 /**
  * Ensures backup folder structure:
- * mc-server-manager / {loader} / {serverId} / backups
+ * mc-server-manager / {loader or modpack} / {serverId} / backups
  * Returns the backups folder ID.
  */
 export async function ensureServerBackupFolder({
   accessToken,
   loader,
   serverId,
-  driveFolderId, // <-- ÚJ PARAMÉTER
-  isModpack      // <-- ÚJ PARAMÉTER
+  driveFolderId, 
+  isModpack      
 }: {
   accessToken: string;
   loader: string;
   serverId: string;
-  driveFolderId?: string; // <-- ÚJ TÍPUS
-  isModpack?: boolean;    // <-- ÚJ TÍPUS
+  driveFolderId?: string; 
+  isModpack?: boolean;    
 }): Promise<string> {
   
   let serverFolderId = driveFolderId;
 
-  // Ha nem kaptunk driveFolderId-t, felépítjük a klasszikus fastruktúrát
+  // Ha nem kaptunk driveFolderId-t, megpróbáljuk felépíteni a fastruktúrát
   if (!serverFolderId) {
+    
+    // ✅ BINGO: Ha ez egy modpack, NEM hozhatunk létre üres mappát, 
+    // mert a Modpack Provisioner feladata lett volna megcsinálni!
+    if (isModpack) {
+      throw new Error("Fatal: Modpack driveFolderId is missing. Cannot recreate an empty modpack folder.");
+    }
+
+    // Csak Vanilla/Sima loader esetén fut le a fallback mappaépítés
     const managerFolderId = await getOrCreateFolder(
       "mc-server-manager",
       null,
@@ -140,10 +148,10 @@ export async function ensureServerBackupFolder({
     );
   }
 
-  // Akár a DB-ből jött, akár most építettük fel, létrehozzuk BENNE a backups mappát
+  // Akár a DB-ből jött, akár most építettük fel (sima szervernél), létrehozzuk BENNE a backups mappát
   const backupsFolderId = await getOrCreateFolder(
     "backups",
-    serverFolderId, // <-- Itt már garantáltan a jó gyökérmappa (modpack esetén is) lesz a szülő!
+    serverFolderId, 
     accessToken
   );
 

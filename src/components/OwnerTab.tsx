@@ -21,6 +21,7 @@ import {
   setDoc,
 } from "firebase/firestore";
 import { db } from "../firebase";
+import { useServerData } from "../ServerDataContext";
 
 type InviteItem = {
   id: string;
@@ -120,6 +121,8 @@ export default function OwnerTab({
   serverId: string;
   accessToken: string;
 }) {
+  const { servers } = useServerData();
+  const currentServer = servers.find((s) => s.id === serverId);
   const [loading, setLoading] = useState(true);
   const [savingRetention, setSavingRetention] = useState(false);
   const [deletingInviteId, setDeletingInviteId] = useState<string | null>(null);
@@ -161,17 +164,15 @@ export default function OwnerTab({
     }
 
     try {
-      const serverRef = doc(db, "servers", serverId);
-      const serverSnap = await getDoc(serverRef);
-const backupRetentionCount =
-  serverSnap.exists() && typeof serverSnap.data()?.backupRetentionCount === "number"
-    ? serverSnap.data()!.backupRetentionCount
-    : 5;
+      const backupRetentionCount =
+        typeof currentServer?.backupRetentionCount === "number"
+          ? currentServer.backupRetentionCount
+          : 5;
 
-const loader =
-  serverSnap.exists() && typeof serverSnap.data()?.loader === "string"
-    ? serverSnap.data()!.loader
-    : "vanilla";
+      const loader =
+        typeof currentServer?.loader === "string"
+          ? currentServer.loader
+          : "vanilla";
 
 setSavedRetention(backupRetentionCount);
 setRetentionInput(String(backupRetentionCount));
