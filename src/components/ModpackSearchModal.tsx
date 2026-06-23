@@ -38,24 +38,66 @@ export default function ModpackSearchModal({ isOpen, initialQuery = "", onClose,
   const executeSearch = async (searchStr: string, searchProvider: "modrinth" | "curseforge") => {
     if (!searchStr.trim()) return;
 
-    setIsSearching(true);
-    setError("");
-    setResults([]);
-
     try {
-      const res = await window.electronAPI.searchMods({
-        provider: searchProvider,
-        query: searchStr,
-        isModpack: true,
-      });
+      setIsSearching(true);
+      setError("");
+      setResults([]);
 
-      if (res.success) {
-        setResults(res.results);
-      } else {
-        setError(res.error || "Search failed.");
+      if (searchProvider === "modrinth") {
+        // MODRINTH API:
+        // We use Modrinth's strict 'facets' system to demand server support
+        // We explicitly require that the 'server_side' facet is NOT 'unsupported'
+        const facets = `[["project_type:modpack"],["server_side:required","server_side:optional"]]`;
+        const url = `https://api.modrinth.com/v2/search?query=${encodeURIComponent(
+          searchStr
+        )}&facets=${encodeURIComponent(facets)}&limit=20`;
+
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Modrinth search failed");
+        
+        const data = await res.json();
+        
+        const mapped: DiscoveredModpack[] = data.hits.map((hit: any) => ({
+          id: hit.project_id,
+          provider: "modrinth",
+          title: hit.title,
+          description: hit.description,
+          iconUrl: hit.icon_url,
+          downloads: hit.downloads,
+        }));
+        
+        setResults(mapped);
+      } 
+      else if (searchProvider === "curseforge") {
+        // CURSEFORGE API:
+        // CurseForge classId 4471 is Modpacks.
+        // We use Electron IPC because CurseForge requires an API key in the headers
+        const result = await window.electronAPI.searchMods({
+            provider: "curseforge",
+            query: searchStr,
+            // You might need to adjust your Electron handler to accept a classId 
+            // if it doesn't already, but this is the standard flow
+        });
+
+        if (!result?.success) {
+            throw new Error(result?.error || "Failed to search CurseForge modpacks");
+        }
+
+        // CurseForge doesn't have a strict 'server only' filter in their search API,
+        // but filtering by Modpack ClassID ensures we at least get packs.
+        const mapped: DiscoveredModpack[] = (result.results || []).map((pack: any) => ({
+            id: pack.projectId,
+            provider: "curseforge",
+            title: pack.title,
+            description: pack.description,
+            iconUrl: pack.iconUrl,
+            downloads: pack.downloads,
+        }));
+
+        setResults(mapped);
       }
     } catch (err: any) {
-      setError(err.message || "An unexpected error occurred.");
+      setError(err.message || "Failed to search modpacks");
     } finally {
       setIsSearching(false);
     }

@@ -22,6 +22,7 @@ import InviteUser from "./InviteUser";
 import { MoreVertical } from "lucide-react";
 import HostServer from "./HostServer";
 import { useServerData } from "../ServerDataContext";
+import AdvancedConfigs from "./AdvancedConfigs";
 
 type ModSideSupport = "server" | "client" | "both" | "optional" | "unknown";
 
@@ -59,6 +60,7 @@ type ServerMod = {
   versionId?: string;
   versionNumber?: string;
   installedAsDependency?: boolean;
+  downloadUrl?: string | null;
 };
 
 export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
@@ -91,9 +93,13 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [extractPath, setExtractPath] = useState("");
   const [serverHosted, setServerHosted] = useState(false);
 
+  //plugins
+  const [showConfigsPanel, setShowConfigsPanel] = useState(false);
+  const [configToken, setConfigToken] = useState<string>("");
+
   const [modsSearch, setModsSearch] = useState("");
   const [showModsPanel, setShowModsPanel] = useState(false);
-  const [modsTab, setModsTab] = useState<"installed" | "discover">("installed");
+  const [modsTab, setModsTab] = useState<"server" | "client" | "discover">("server");
   const [mods, setMods] = useState<ServerMod[]>([]);
   const [modsLoading, setModsLoading] = useState(false);
   const [modsUploading, setModsUploading] = useState(false);
@@ -102,6 +108,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
   const [modsTogglingId, setModsTogglingId] = useState<string | null>(null);
   const [modsError, setModsError] = useState("");
   const [modsNotice, setModsNotice] = useState("");
+  const [exportingProfile, setExportingProfile] = useState(false);
 
   const [discoverQuery, setDiscoverQuery] = useState("");
   const [discoverProvider, setDiscoverProvider] = useState<"modrinth" | "curseforge">("modrinth");
@@ -231,7 +238,45 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     setShowModsPanel((prev) => !prev);
   }
 
- 
+  async function handleExportClientProfile() {
+  try {
+    setExportingProfile(true);
+    setModsError("");
+    setModsNotice("");
+
+    // 1. Ask the user where they want to save the mods
+    const localDestination = await window.electronAPI.selectFolder();
+    if (!localDestination) return;
+
+    const { accessToken } = await getServerDriveContext();
+
+    // 2. Gather Virtual Client Mods (Ensure they have URLs)
+    const virtualToDownload = virtualClientMods
+      .filter(m => m.downloadUrl)
+      .map(m => ({ name: m.name, url: m.downloadUrl as string }));
+
+    // 3. Gather Physical Server Mods (Exclude purely Server-Only ones)
+    const physicalToDownload = validServerMods
+      .filter(m => m.sideSupport !== "server" && m.driveFileId)
+      .map(m => ({ name: m.name, driveFileId: m.driveFileId as string }));
+
+    // 4. Send to Electron
+    const res = await window.electronAPI.exportClientProfile({
+      accessToken,
+      virtualMods: virtualToDownload,
+      physicalMods: physicalToDownload,
+      localDestination
+    });
+
+    if (!res.success) throw new Error(res.error || "Failed to export profile");
+
+    setModsNotice(`Successfully exported ${virtualToDownload.length + physicalToDownload.length} mods to ${localDestination}!`);
+  } catch (err: any) {
+    setModsError(err.message || String(err));
+  } finally {
+    setExportingProfile(false);
+  }
+} 
 
   async function handleOpenOwnerWindow() {
     try {
@@ -250,9 +295,10 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     }
   }
 
-  async function upsertModsInFirestore(
+async function upsertModsInFirestore(
     incomingMods: Array<{
       id: string;
+      driveFileId?: string | null; // <-- Added this to support virtual client mods
       name: string;
       size?: string | null;
       createdTime?: string | null;
@@ -266,25 +312,19 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       versionId?: string;
       versionNumber?: string;
       installedAsDependency?: boolean;
+      downloadUrl?: string; // <-- Save the link for the user
     }>
   ): Promise<void> {
     const modsCollectionRef = collection(db, "servers", serverId, "mods");
     const existingSnapshot = await getDocs(modsCollectionRef);
 
-    const existingByName = new Map<
-      string,
-      { id: string; ref: any; data: any }
-    >();
+    const existingByName = new Map<string, { id: string; ref: any; data: any }>();
 
     existingSnapshot.docs.forEach((docSnap) => {
       const data = docSnap.data();
       const name = typeof data.name === "string" ? data.name : "";
       if (name) {
-        existingByName.set(name, {
-          id: docSnap.id,
-          ref: docSnap.ref,
-          data,
-        });
+        existingByName.set(name, { id: docSnap.id, ref: docSnap.ref, data });
       }
     });
 
@@ -302,7 +342,8 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
       batch.set(
         modRef,
         {
-          driveFileId: mod.id,
+          // If it's virtual, driveFileId is null. Otherwise, fallback to the physical ID
+          driveFileId: mod.driveFileId !== undefined ? mod.driveFileId : mod.id,
           name: mod.name,
           size: mod.size ?? null,
           createdTime: mod.createdTime ?? null,
@@ -316,6 +357,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
           versionId: mod.versionId ?? null,
           versionNumber: mod.versionNumber ?? null,
           installedAsDependency: mod.installedAsDependency ?? false,
+          downloadUrl: mod.downloadUrl ?? null,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -323,7 +365,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     }
 
     await batch.commit();
-  }
+}
 
   async function handleDiscoverSearch() {
     try {
@@ -469,7 +511,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
           ? `Installed ${preview.project.title} + ${depCount} dependenc${depCount === 1 ? "y" : "ies"}`
           : `Installed ${preview.project.title}`
       );
-      setModsTab("installed");
+      setModsTab("server");
     } catch (err: any) {
       setDiscoverError(err?.message || String(err));
     } finally {
@@ -623,59 +665,107 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
 
       const [enabledResult, disabledResult] = await Promise.all([
         window.electronAPI.listDriveFolderFiles({
-          accessToken,
-          serverId,
-          loader,
-          folderName: "mods",
+          accessToken, serverId, loader, folderName: "mods",
           driveFolderId: currentServer?.driveFolderId,
           isModpack: currentServer?.isModpack,
         }),
         window.electronAPI.listDriveFolderFiles({
-          accessToken,
-          serverId,
-          loader,
-          folderName: "mods-disabled",
+          accessToken, serverId, loader, folderName: "mods-disabled",
           driveFolderId: currentServer?.driveFolderId,
           isModpack: currentServer?.isModpack,
         }),
       ]);
 
-      if (!enabledResult.success) {
-        throw new Error(enabledResult.error || 'Failed to list "mods" from Drive.');
+      if (!enabledResult.success) throw new Error(enabledResult.error || 'Failed to list "mods".');
+      if (!disabledResult.success) throw new Error(disabledResult.error || 'Failed to list "mods-disabled".');
+
+      let allDriveMods = [
+        ...(enabledResult.files ?? []).map((m: any) => ({ ...m, enabled: true })),
+        ...(disabledResult.files ?? []).map((m: any) => ({ ...m, enabled: false }))
+      ];
+
+      // --- THE METADATA BRIDGE ---
+      const metaFile = allDriveMods.find(m => m.name === ".manager-meta.json");
+      let metaData: any[] = [];
+
+      if (metaFile) {
+         const metaContent = await window.electronAPI.downloadDriveFileText({
+             accessToken,
+             fileId: metaFile.id
+         });
+         
+         if (metaContent?.success && metaContent.text) {
+             try {
+                metaData = JSON.parse(metaContent.text);
+             } catch (e) {
+                console.error("Failed to parse .manager-meta.json");
+             }
+         }
+         
+         // Hide the meta file from the UI
+         allDriveMods = allDriveMods.filter(m => m.id !== metaFile.id);
       }
 
-      if (!disabledResult.success) {
-        throw new Error(disabledResult.error || 'Failed to list "mods-disabled" from Drive.');
+      const finalModsToSave: any[] = [];
+
+      // Helper function to calculate the final badge string
+      const deriveSideSupport = (client: string, server: string) => {
+        if (server === "unsupported" && client !== "unsupported") return "client";
+        if (client === "unsupported" && server !== "unsupported") return "server";
+        if (client !== "unsupported" && server !== "unsupported" && client !== "unknown") return "both";
+        return "unknown";
+      };
+
+      // 1. Process Physical Server Mods
+      for (const driveMod of allDriveMods) {
+          const metaMatch = metaData.find(meta => meta.fileName === driveMod.name);
+          const clientSide = metaMatch?.clientSide || "unknown";
+          const serverSide = metaMatch?.serverSide || "unknown";
+          
+          finalModsToSave.push({
+              id: driveMod.id,
+              driveFileId: driveMod.id,
+              name: driveMod.name,
+              size: driveMod.size,
+              createdTime: driveMod.createdTime,
+              enabled: driveMod.enabled,
+              source: metaMatch ? "modrinth" : "manual",
+              clientSide: clientSide,
+              serverSide: serverSide,
+              sideSupport: deriveSideSupport(clientSide, serverSide), // <-- NOW IT CALCULATES!
+              provider: metaMatch?.provider || (metaMatch ? "modrinth" : null),
+              projectId: metaMatch?.projectId || null
+          });
       }
 
-      const enabledMods = (enabledResult.files ?? []).map((mod: any) => ({
-        id: mod.id,
-        name: mod.name,
-        size: mod.size,
-        createdTime: mod.createdTime,
-        enabled: true,
-        source: "manual" as const,
-      }));
+      // 2. Process Virtual Client-Only Mods
+      const clientOnlyMeta = metaData.filter(meta => meta.serverSide === "unsupported");
+      for (const clientMod of clientOnlyMeta) {
+          finalModsToSave.push({
+              id: `virtual-${clientMod.fileName}`, 
+              driveFileId: null, // Null proves it takes up no Drive space!
+              name: clientMod.fileName,
+              size: null,
+              createdTime: new Date().toISOString(),
+              enabled: false, // Inherently disabled on server
+              source: "modrinth",
+              clientSide: clientMod.clientSide || "required",
+              serverSide: "unsupported",
+              sideSupport: "client", // <-- Always client for virtuals
+              provider: clientMod.provider || "modrinth",
+              projectId: clientMod.projectId || null,
+              downloadUrl: clientMod.downloads?.[0] || null
+          });
+      }
 
-      const disabledMods = (disabledResult.files ?? []).map((mod: any) => ({
-        id: mod.id,
-        name: mod.name,
-        size: mod.size,
-        createdTime: mod.createdTime,
-        enabled: false,
-        source: "manual" as const,
-      }));
-
-      const allDriveMods = [...enabledMods, ...disabledMods];
-
-      if (allDriveMods.length > 0) {
-        await upsertModsInFirestore(allDriveMods);
+      if (finalModsToSave.length > 0) {
+        await upsertModsInFirestore(finalModsToSave);
       }
 
       setModsNotice(
-        allDriveMods.length === 0
+        finalModsToSave.length === 0
           ? "No mods found in Drive."
-          : `Synced ${allDriveMods.length} mod${allDriveMods.length === 1 ? "" : "s"} from Drive.`
+          : `Synced ${allDriveMods.length} server mods and ${clientOnlyMeta.length} virtual client mods.`
       );
     } catch (err: any) {
       setModsError(err.message || String(err));
@@ -686,6 +776,19 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
 
   async function handleToggleModEnabled(mod: ServerMod) {
     try {
+      // THE ANTI-CRASH SAFETY NET
+      if (!mod.enabled && mod.serverSide === "unsupported") {
+        alert(
+          `🚨 STOP! "${mod.name}" is a Client-Only mod (like a minimap, HUD, or FPS booster).\n\nEnabling this on the server will cause an instant crash. It must remain disabled.`
+        );
+        return; 
+      }
+      
+      if (!mod.driveFileId) {
+         alert("This is a virtual client-side modpack file. It does not exist on the server.");
+         return;
+      }
+
       setModsTogglingId(mod.id);
       setModsError("");
       setModsNotice("");
@@ -704,9 +807,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
         toFolderName,
       });
 
-      if (!result.success) {
-        throw new Error(result.error || "Failed to move mod between Drive folders.");
-      }
+      if (!result.success) throw new Error(result.error || "Failed to move mod.");
 
       await updateDoc(doc(db, "servers", serverId, "mods", mod.id), {
         enabled: !mod.enabled,
@@ -719,7 +820,7 @@ export default function ServerDetails({ serverId, user }: ServerDetailsProps) {
     } finally {
       setModsTogglingId(null);
     }
-  }
+}
 
   function formatFileSize(size?: string) {
     const bytes = Number(size);
@@ -1248,6 +1349,9 @@ async function handleJoin() {
     }
   }
 
+  const validServerMods = filteredMods.filter((mod) => mod.serverSide !== "unsupported");
+  const virtualClientMods = filteredMods.filter((mod) => mod.serverSide === "unsupported");
+
   return (
     <div className="flex gap-6 items-start">
       <div className="flex-1 min-w-0">
@@ -1270,7 +1374,7 @@ async function handleJoin() {
                 className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
               >
                 {inviteActionLoading ? "Declining..." : "Decline"}
-              </button> 
+              </button>
             </div>
           </div>
         )}
@@ -1343,9 +1447,31 @@ async function handleJoin() {
               </button>
             )}
 
+            {/* THE NEW CONFIGS BUTTON */}
+            <button
+              onClick={async () => {
+                if (!showConfigsPanel) {
+                  // Only fetch the token when opening the panel
+                  const ctx = await getServerDriveContext();
+                  setConfigToken(ctx.accessToken);
+                  if (showModsPanel) setShowModsPanel(false); // Close mods panel if open
+                }
+                setShowConfigsPanel(!showConfigsPanel);
+              }}
+              className={`px-4 py-2 text-white rounded ${showConfigsPanel
+                ? "bg-slate-800"
+                : "bg-slate-700 hover:bg-slate-800"
+                }`}
+            >
+              {showConfigsPanel ? "Hide Configs" : "Configs"}
+            </button>
+
             {isModServer && (
               <button
-                onClick={handleToggleModsPanel}
+                onClick={() => {
+                  handleToggleModsPanel();
+                  if (!showModsPanel) setShowConfigsPanel(false); // Close configs panel if open
+                }}
                 className={`px-4 py-2 text-white rounded ${showModsPanel
                   ? "bg-slate-800"
                   : "bg-slate-700 hover:bg-slate-800"
@@ -1356,7 +1482,6 @@ async function handleJoin() {
             )}
           </div>
         </div>
-
 
         <div className="mb-4 rounded-xl border border-gray-300 bg-white px-4 py-3 shadow-sm">
           <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -1423,8 +1548,6 @@ async function handleJoin() {
           />
         )}
 
-
-
         <InviteUser serverId={serverId} onUserInvited={onUserInvited} />
 
         <div ref={menuRef}>
@@ -1450,8 +1573,6 @@ async function handleJoin() {
                       ? "Last joined: " + u.lastJoined.toDate().toLocaleString()
                       : "Never joined"}
                   </div>
-
-
 
                   {canManageUsers() && u.id !== serverOwnerId && (
                     <div className="relative">
@@ -1517,20 +1638,31 @@ async function handleJoin() {
                 </button>
               </div>
 
+              {/* THREE TABS LAYOUT */}
               <div className="mt-3 flex gap-2">
                 <button
-                  onClick={() => setModsTab("installed")}
-                  className={`px-3 py-1.5 rounded text-sm ${modsTab === "installed"
+                  onClick={() => setModsTab("server")}
+                  className={`px-3 py-1.5 rounded text-sm font-medium ${modsTab === "server"
                     ? "bg-blue-600 text-white"
                     : "bg-gray-200 text-gray-800 hover:bg-gray-300"
                     }`}
                 >
-                  Installed
+                  Server Mods
+                </button>
+
+                <button
+                  onClick={() => setModsTab("client")}
+                  className={`px-3 py-1.5 rounded text-sm font-medium ${modsTab === "client"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                    }`}
+                >
+                  Client Profile
                 </button>
 
                 <button
                   onClick={() => setModsTab("discover")}
-                  className={`px-3 py-1.5 rounded text-sm ${modsTab === "discover"
+                  className={`px-3 py-1.5 rounded text-sm font-medium ${modsTab === "discover"
                     ? "bg-blue-600 text-white"
                     : "bg-gray-200 text-gray-800 hover:bg-gray-300"
                     }`}
@@ -1538,24 +1670,26 @@ async function handleJoin() {
                   Discover
                 </button>
               </div>
-              {modsTab === "installed" && (
+
+              {/* SHARED SEARCH BAR FOR SERVER/CLIENT TABS */}
+              {(modsTab === "server" || modsTab === "client") && (
                 <div className="mt-3">
                   <input
                     type="text"
                     value={modsSearch}
                     onChange={(e) => setModsSearch(e.target.value)}
-                    placeholder="Search mods... (@enabled, @disabled, @forge)"
+                    placeholder={`Search ${modsTab} mods...`}
                     className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                   />
-                </div>
-              )}
-              {modsTab === "installed" && (
-                <div className="mt-2 text-sm text-gray-500">
-                  {modsLoading
-                    ? "Loading..."
-                    : `${filteredMods.length
-                    } mod${filteredMods.length === 1 ? "" : "s"} shown • ${filteredMods.filter((mod) => mod.enabled).length
-                    } active`}
+                  <div className="mt-2 text-xs text-gray-500">
+                    {modsLoading ? (
+                      "Loading..."
+                    ) : modsTab === "server" ? (
+                      `${validServerMods.length} server mod${validServerMods.length === 1 ? "" : "s"} shown • ${validServerMods.filter((mod) => mod.enabled).length} active`
+                    ) : (
+                      `${virtualClientMods.length} client mod${virtualClientMods.length === 1 ? "" : "s"} mapped`
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -1573,52 +1707,32 @@ async function handleJoin() {
             )}
 
             <div className="flex-1 overflow-y-auto bg-white">
-              {modsTab === "installed" && (
+              
+              {/* SERVER MODS TAB */}
+              {modsTab === "server" && (
                 <>
                   {modsLoading ? (
+                    <div className="px-4 py-4 text-sm text-gray-500">Loading mods...</div>
+                  ) : validServerMods.length === 0 ? (
                     <div className="px-4 py-4 text-sm text-gray-500">
-                      Loading mods...
-                    </div>
-                  ) : filteredMods.length === 0 ? (
-                    <div className="px-4 py-4 text-sm text-gray-500">
-                      {mods.length === 0 ? (
-                        <>
-                          No mods indexed yet.
-                          {isAdmin && (
-                            <div className="mt-2">
-                              If this server already has mods in Drive, use{" "}
-                              <span className="font-medium">Sync from Drive</span>.
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <>No installed mods match your search.</>
-                      )}
+                      {mods.length === 0 ? "No mods indexed yet." : "No server mods match your search."}
                     </div>
                   ) : (
-                    <ul className="divide-y divide-gray-100">
-                      {filteredMods.map((mod) => {
+                    <ul className="divide-y divide-gray-100 pb-4">
+                      {validServerMods.map((mod) => {
                         const parsed = parseModDisplayInfo(mod.name);
-
                         return (
-                          <li
-                            key={mod.id}
-                            className="px-3 py-2 flex items-center justify-between gap-3 hover:bg-gray-50"
-                          >
+                          <li key={mod.id} className="px-3 py-2 flex items-center justify-between gap-3 hover:bg-gray-50">
                             <>
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 min-w-0">
                                   <div className="text-sm font-medium text-gray-900 truncate">
                                     {parsed.displayName}
                                   </div>
-
-                                  <span
-                                    className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-medium ${getSideBadgeClass(mod.sideSupport)}`}
-                                  >
+                                  <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-medium ${getSideBadgeClass(mod.sideSupport)}`}>
                                     {getSideBadgeLabel(mod.sideSupport)}
                                   </span>
                                 </div>
-
                                 <div className="text-xs text-gray-500 truncate">
                                   {parsed.version && `v${parsed.version} • `}
                                   {parsed.loader}
@@ -1631,14 +1745,10 @@ async function handleJoin() {
                                   <button
                                     onClick={() => handleToggleModEnabled(mod)}
                                     disabled={modsTogglingId === mod.id}
-                                    className={`px-2 py-1 text-xs text-white rounded ${mod.enabled
-                                      ? "bg-amber-500 hover:bg-amber-600"
-                                      : "bg-emerald-500 hover:bg-emerald-600"
-                                      }`}
+                                    className={`px-2 py-1 text-xs text-white rounded ${mod.enabled ? "bg-amber-500 hover:bg-amber-600" : "bg-emerald-500 hover:bg-emerald-600"}`}
                                   >
                                     {modsTogglingId === mod.id ? "..." : mod.enabled ? "Off" : "On"}
                                   </button>
-
                                   <button
                                     onClick={() => handleDeleteMod(mod.id)}
                                     className="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600"
@@ -1656,6 +1766,69 @@ async function handleJoin() {
                 </>
               )}
 
+              {/* CLIENT MODS TAB */}
+              {modsTab === "client" && (
+                <>
+                  {modsLoading ? (
+                    <div className="px-4 py-4 text-sm text-gray-500">Loading mods...</div>
+                  ) : virtualClientMods.length === 0 ? (
+                    <div className="px-4 py-4 text-sm text-gray-500">
+                      No purely client-side mods were detected in this pack.
+                    </div>
+                  ) : (
+                    <div className="pb-4">
+                      <div className="p-4 border-b border-gray-200 bg-gray-50 sticky top-0 z-10 shadow-sm">
+                        <h4 className="text-sm font-semibold text-gray-800">Download Client Pack</h4>
+                        <p className="text-xs text-gray-500 mt-1 mb-3">
+                          Download a complete ZIP of all {virtualClientMods.length} visual/client mods + the {validServerMods.filter(m => m.sideSupport !== "server").length} shared content mods to use on your local PC.
+                        </p>
+                        <button 
+                          onClick={handleExportClientProfile}
+                          disabled={exportingProfile}
+                          className="w-full text-sm bg-indigo-600 text-white py-2 rounded-md font-medium hover:bg-indigo-700 transition disabled:opacity-50 shadow-sm"
+                        >
+                          {exportingProfile ? "Downloading Profile..." : "Download Client Profile"}
+                        </button>
+                      </div>
+
+                      <ul className="divide-y divide-gray-100">
+                        {virtualClientMods.map((mod) => {
+                          const parsed = parseModDisplayInfo(mod.name);
+                          return (
+                            <li key={mod.id} className="px-4 py-3 flex items-center justify-between gap-3 bg-white">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="text-sm font-medium text-gray-800 truncate">
+                                    {parsed.displayName}
+                                  </div>
+                                  <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-100 text-amber-800`}>
+                                    Client Only
+                                  </span>
+                                </div>
+                                <div className="text-xs text-gray-400 truncate mt-0.5">
+                                  {parsed.version && `v${parsed.version} • `}
+                                  {parsed.loader}
+                                </div>
+                              </div>
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleDeleteMod(mod.id)}
+                                  className="px-2 py-1 text-xs bg-gray-200 text-gray-600 rounded hover:bg-red-500 hover:text-white transition"
+                                  title="Remove from database"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* DISCOVER TAB */}
               {modsTab === "discover" && (
                 <div className="p-4 space-y-4">
                   <div className="space-y-3">
@@ -1769,6 +1942,7 @@ async function handleJoin() {
               )}
             </div>
 
+            {/* SHARED BOTTOM BAR */}
             <div className="px-4 py-3 border-t bg-gray-50 flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs text-gray-500">
                 Live synced across devices
@@ -1807,7 +1981,34 @@ async function handleJoin() {
           </div>
         </div>
       )}
+      {/* THE INDEPENDENT CONFIGS PANEL */}
+      {showConfigsPanel && (
+        <div className="w-[600px] shrink-0">
+          <div className="rounded-xl border border-gray-300 bg-white shadow-md flex flex-col h-[calc(100vh-140px)] overflow-hidden">
+            <div className="px-4 py-3 border-b bg-gray-50 flex items-start justify-between gap-3">
+              <div>
+                <div className="font-semibold text-lg">Advanced Configs</div>
+                <div className="text-sm text-gray-500">Edit raw server files directly from the cloud</div>
+              </div>
+              <button
+                onClick={() => setShowConfigsPanel(false)}
+                className="px-2 py-1 rounded text-gray-500 hover:bg-gray-200 hover:text-gray-800"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
+              <AdvancedConfigs
+                serverId={serverId}
+                serverRootFolderId={currentServer?.driveFolderId || ""}
+                accessToken={configToken}
+                serverPath={extractPath || "editor-temp"}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-

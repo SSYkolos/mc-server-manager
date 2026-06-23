@@ -37,6 +37,27 @@ declare global {
         error?: string;
       }>;
 
+      downloadDriveFileText: (args: { accessToken: string; fileId: string }) => Promise<{
+        success: boolean;
+        text?: string;
+        error?: string
+      }>;
+
+
+      // Config Editor IPCs
+    pullLiveConfigs: (args: { accessToken: string; serverId: string; serverRootFolderId: string; serverPath: string }) => Promise<{ success: boolean; error?: string }>;
+    getConfigTree: (args: { serverPath: string }) => Promise<{ success: boolean; tree?: any[]; error?: string }>;
+    readConfigFile: (args: { serverPath: string; filePath: string }) => Promise<{ success: boolean; content?: string; error?: string }>;
+    saveConfigFile: (args: { serverPath: string; filePath: string; content: string }) => Promise<{ success: boolean; error?: string }>;
+    pushLiveConfigs: (args: { accessToken: string; serverRootFolderId: string; serverPath: string }) => Promise<{ success: boolean; error?: string }>;
+
+      exportClientProfile: (args: {
+    accessToken: string;
+    virtualMods: { name: string; url: string }[];
+    physicalMods: { name: string; driveFileId: string }[];
+    localDestination: string;
+  }) => Promise<{ success: boolean; error?: string }>;
+
 
       installModpack: (args: {
         serverId: string;
@@ -388,6 +409,8 @@ declare global {
         serverId: string;
         loader: string;
         localDestination: string;
+        driveFolderId?: string;
+        isModpack?: boolean;
       }) => Promise<{
         success: boolean;
         downloadedCount?: number;

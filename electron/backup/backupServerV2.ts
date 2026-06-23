@@ -19,6 +19,9 @@ import { loadHashCache } from "./loadHashCache"
 import { saveHashCache } from "./saveHashCache"
 import { loadFileState } from "./loadFileState"
 import { saveFileState } from "./saveFileState"
+import { zipDirectory } from "./zipHelper";
+import { applyRetention } from "./applyRetention";
+import axios from "axios";
 
 async function safeRemove(p: string) {
   try {
@@ -40,6 +43,21 @@ function isWorldRootPath(relPath: string) {
     p === "world_the_end" ||
     p.startsWith("world_the_end/")
   )
+}
+
+// Helper to construct Google Drive multipart requests
+function createMultipartBody(name: string, parentId: string, json: any = {}) {
+  return [
+    "--foo_bar_baz",
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    JSON.stringify({ name, parents: [parentId] }),
+    "--foo_bar_baz",
+    "Content-Type: application/json",
+    "",
+    JSON.stringify(json, null, 2),
+    "--foo_bar_baz--"
+  ].join("\r\n");
 }
 
 function canReuseSmallPackFile(args: {
@@ -246,42 +264,55 @@ export async function backupServerV2({
     const snapshotDir = path.join(tempDir, snapshotId)
     fs.mkdirSync(snapshotDir, { recursive: true })
 
+    // ==========================================
+    // 0. CREATE SNAPSHOT FOLDER IN DRIVE FIRST
+    // ==========================================
+    console.log("[Backup] Creating Drive Snapshot Folder...");
+    const driveSnapshotFolderRes = await axios.post(
+      "https://www.googleapis.com/drive/v3/files",
+      {
+        name: snapshotId,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [structure.snapshots]
+      },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    const targetSnapshotFolderId = driveSnapshotFolderRes.data.id;
+
     const pathToPack: Record<
       string,
       { fileId: string; fileName: string; packHash: string }
     > = {}
 
-    // 1) Reuse unchanged small files from previous file-state + current pack index
-for (const file of unchangedSmallFiles) {
-  const prev = previousFileState?.[file.path]
+    for (const file of unchangedSmallFiles) {
+      const prev = previousFileState?.[file.path]
 
-  if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
-    throw new Error(`Missing reusable pack metadata for ${file.path}`)
-  }
+      if (!prev || prev.storage !== "small-pack" || !prev.packHash) {
+        throw new Error(`Missing reusable pack metadata for ${file.path}`)
+      }
 
-  const packMeta = packIndex[prev.packHash]
+      const packMeta = packIndex[prev.packHash]
 
-  if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
-    throw new Error(`Missing packIndex entry for ${file.path}`)
-  }
+      if (!packMeta || !packMeta.fileId || !packMeta.entriesByPath) {
+        throw new Error(`Missing packIndex entry for ${file.path}`)
+      }
 
-  const entry = packMeta.entriesByPath[file.path]
-  if (!entry) {
-    throw new Error(`Pack membership missing for ${file.path}`)
-  }
+      const entry = packMeta.entriesByPath[file.path]
+      if (!entry) {
+        throw new Error(`Pack membership missing for ${file.path}`)
+      }
 
-  if (entry.size !== file.size || entry.hash !== file.hash) {
-    throw new Error(`Pack membership mismatch for ${file.path}`)
-  }
+      if (entry.size !== file.size || entry.hash !== file.hash) {
+        throw new Error(`Pack membership mismatch for ${file.path}`)
+      }
 
-  pathToPack[file.path] = {
-    fileId: packMeta.fileId,
-    fileName: packMeta.name,
-    packHash: prev.packHash
-  }
-}
+      pathToPack[file.path] = {
+        fileId: packMeta.fileId,
+        fileName: packMeta.name,
+        packHash: prev.packHash
+      }
+    }
 
-    // 2) Add newly uploaded/reused changed packs
     for (const pack of uploadedSmallPacks) {
       for (const entry of pack.entries) {
         pathToPack[entry.path] = {
@@ -312,7 +343,6 @@ for (const file of unchangedSmallFiles) {
       }
     })
 
-    // ✅ FIX: add hash to small entries
     const smallEntries = metadataPackFiles.map((file: any) => {
       const packMeta = pathToPack[file.path]
 
@@ -330,6 +360,62 @@ for (const file of unchangedSmallFiles) {
         packFileName: packMeta.fileName
       }
     })
+
+    // ==========================================
+    // 1. THE CONFIG & PLUGIN DUAL-UPLOAD
+    // ==========================================
+    console.log("[Backup] Zipping Configs and Plugins...");
+    const tempConfigsZip = path.join(serverPath, ".temp-configs.zip");
+    const tempPluginsZip = path.join(serverPath, ".temp-plugins.zip");
+
+    const hasConfigs = await zipDirectory(path.join(serverPath, "config"), tempConfigsZip);
+    const hasPlugins = await zipDirectory(path.join(serverPath, "plugins"), tempPluginsZip);
+
+    const uploadDualStateZip = async (filePath: string, fileName: string) => {
+      const fileStat = fs.statSync(filePath);
+
+      // A. Upload to Snapshot Folder (For the Backup) - HASZNÁLJUK AZ ÚJ ID-T!
+      let res = await axios.post(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+        createMultipartBody(fileName, targetSnapshotFolderId, {}),
+        { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "multipart/related; boundary=foo_bar_baz" } }
+      );
+      await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${res.data.id}?uploadType=media`, fs.createReadStream(filePath), {
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Length": fileStat.size }
+      });
+
+      // B. Upload/Overwrite to Server Root (The "Live Head" for your UI Editor)
+      const searchRes = await axios.get("https://www.googleapis.com/drive/v3/files", {
+        params: { q: `'${driveBackupFolderId}' in parents and name='live-${fileName}' and trashed=false` },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const existingLiveId = searchRes.data.files?.[0]?.id;
+
+      if (existingLiveId) {
+        await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${existingLiveId}?uploadType=media`, fs.createReadStream(filePath), {
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Length": fileStat.size }
+        });
+      } else {
+        res = await axios.post(
+          "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+          createMultipartBody(`live-${fileName}`, driveBackupFolderId, {}),
+          { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "multipart/related; boundary=foo_bar_baz" } }
+        );
+        await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${res.data.id}?uploadType=media`, fs.createReadStream(filePath), {
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Length": fileStat.size }
+        });
+      }
+    };
+
+    if (hasConfigs) {
+      await uploadDualStateZip(tempConfigsZip, "configs.zip");
+      fs.rmSync(tempConfigsZip, { force: true });
+    }
+    if (hasPlugins) {
+      await uploadDualStateZip(tempPluginsZip, "plugins.zip");
+      fs.rmSync(tempPluginsZip, { force: true });
+    }
+    console.log("[Backup] Live Head and Snapshot Configs Secured.");
 
     createSnapshotManifest({
       snapshotId,
@@ -392,6 +478,37 @@ for (const file of unchangedSmallFiles) {
       smallPackFiles: metadataPackFiles.length,
       largeObjectFiles: largeObjectInputs.length
     })
+
+    // ==========================================
+    // 2. THE RETENTION LOGIC
+    // ==========================================
+    if (retention > 0) {
+      console.log(`[Backup] Enforcing retention limit of ${retention}...`);
+      const snapshotsRes = await axios.get("https://www.googleapis.com/drive/v3/files", {
+        params: { 
+          q: `'${structure.snapshots}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`, 
+          fields: "files(id, name)" 
+        },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      
+      const allSnapshots = snapshotsRes.data.files || [];
+      
+      const snapshotNames = allSnapshots.map((s: any) => s.name);
+      const namesToDelete = applyRetention(snapshotNames, retention);
+      
+      const idsToDelete = allSnapshots
+        .filter((s: any) => namesToDelete.includes(s.name))
+        .map((s: any) => s.id);
+      
+      for (const idToDelete of idsToDelete) {
+        console.log(`[Backup] Deleting old snapshot folder: ${idToDelete}`);
+        await axios.delete(`https://www.googleapis.com/drive/v3/files/${idToDelete}`, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+      }
+    }
+    
   } finally {
     await saveHashCache(hashCachePath, nextHashCache)
     await safeRemove(tempDir)

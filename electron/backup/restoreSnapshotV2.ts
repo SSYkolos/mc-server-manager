@@ -225,12 +225,14 @@ async function verifyRestoredFiles({
 export async function restoreSnapshotV2({
   drive,
   snapshotFolderId,
+  serverRootFolderId, // <-- ADDED THIS FOR THE DUAL ARCHITECTURE
   serverPath,
   accessToken,
   onProgress
 }: {
   drive: any
   snapshotFolderId: string
+  serverRootFolderId: string // <-- ADDED THIS FOR THE DUAL ARCHITECTURE
   serverPath: string
   accessToken: string
   onProgress?: (progress: RestoreProgress) => void
@@ -399,7 +401,6 @@ export async function restoreSnapshotV2({
         const extractDir = path.join(restorePackCacheDir, first.packHash)
         await fs.promises.mkdir(extractDir, { recursive: true })
 
-        // 1. Robust parsing that explicitly waits for all OS file writes to finish
         await new Promise<void>((resolve, reject) => {
           let pending = 0;
           let zipEnded = false;
@@ -447,7 +448,6 @@ export async function restoreSnapshotV2({
           const targetPath = path.join(serverPath, smallFile.path);
           const restoredFilePath = path.join(packCache[packFileId], smallFile.path);
 
-          // 2. Graceful fallback so a single missing minor file doesn't nuke the restore
           if (!fs.existsSync(restoredFilePath)) {
             console.warn(`[Restore Warning] Missing entry in pack: ${smallFile.path}. Skipping file...`);
             continue; 
@@ -476,6 +476,66 @@ export async function restoreSnapshotV2({
         total: packEntries.length,
         percent: makePercent(packDone, packTotal)
       })
+    }
+
+    // ==========================================
+    // 3. RESTORE CONFIGS AND PLUGINS
+    // ==========================================
+    emit({
+      phase: "finalizing",
+      message: "Restoring Configs and Plugins",
+      current: 0, total: 1, percent: 0
+    });
+
+    const snapshotFilesRes = await drive.files.list({
+      q: `'${snapshotFolderId}' in parents and (name='configs.zip' or name='plugins.zip') and trashed=false`,
+      fields: "files(id, name)"
+    });
+
+    for (const file of snapshotFilesRes.data.files || []) {
+        const tempZipPath = path.join(serverPath, `.temp-${file.name}`);
+        const targetExtractFolder = path.join(serverPath, file.name === "configs.zip" ? "config" : "plugins");
+        
+        if (fs.existsSync(targetExtractFolder)) {
+            fs.rmSync(targetExtractFolder, { recursive: true, force: true });
+        }
+        
+        await downloadFile(accessToken, file.id, tempZipPath);
+        
+        // Extract safely using unzipper streams
+        await new Promise<void>((resolve, reject) => {
+          const stream = fs.createReadStream(tempZipPath).pipe(unzipper.Parse());
+          stream.on("entry", (entry: any) => {
+            const filePath = path.join(targetExtractFolder, entry.path);
+            if (entry.type === "Directory") {
+              fs.mkdirSync(filePath, { recursive: true });
+              entry.autodrain();
+            } else {
+              fs.mkdirSync(path.dirname(filePath), { recursive: true });
+              entry.pipe(fs.createWriteStream(filePath));
+            }
+          });
+          stream.on("close", resolve);
+          stream.on("error", reject);
+        });
+
+        // IMMEDIATELY OVERWRITE THE LIVE HEAD!
+        console.log(`[Restore] Resetting Live Head for ${file.name}...`);
+        if (serverRootFolderId) {
+            const liveSearchRes = await drive.files.list({
+                q: `'${serverRootFolderId}' in parents and name='live-${file.name}' and trashed=false`,
+                fields: "files(id)"
+            });
+
+            const liveFile = liveSearchRes.data.files?.[0];
+            if (liveFile) {
+                const stat = fs.statSync(tempZipPath);
+                await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${liveFile.id}?uploadType=media`, fs.createReadStream(tempZipPath), {
+                    headers: { Authorization: `Bearer ${accessToken}`, "Content-Length": stat.size }
+                });
+            }
+        }
+        fs.rmSync(tempZipPath, { force: true });
     }
 
     emit({

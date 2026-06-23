@@ -322,25 +322,38 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         }
       }
 
-            const modsPath = path.join(extractPath, "mods");
+      const modsPath = path.join(extractPath, "mods");
       const configPath = path.join(extractPath, "config");
       const pluginsPath = path.join(extractPath, "plugins");
 
-      if (!selectedBackup) {
-        updateSetupProgress("mods", "Syncing mods folder", 3, 7);
-        const modsResult = await window.electronAPI.downloadDriveFolder({
+      // =========================================================
+      // 1. ALWAYS SYNC MODS (Whether it's a fresh install OR restore)
+      // =========================================================
+      if (["fabric", "forge", "neoforge", "quilt"].includes(loader)) {
+        updateSetupProgress("mods", "Syncing master mods from Drive", 3, 7);
+        
+        // Use our brand new, highly optimized MD5 Smart-Sync function!
+        const modsResult = await window.electronAPI.downloadModsToFolder({
           accessToken,
-          serverRootFolderId,
-          folderName: "mods",
+          serverId,
+          loader: driveCategoryFolder,
           localDestination: modsPath,
+          driveFolderId, // Passes the ID to find the Modpack folder
+          isModpack      // Passes the boolean to format the path correctly
         });
 
         if (!modsResult.success) {
-          alert(`Failed to download mods folder: ${modsResult.error}`);
+          alert(`Failed to sync mods: ${modsResult.error}`);
           setLoading(false);
           return;
         }
+      }
 
+      // =========================================================
+      // 2. ONLY DOWNLOAD CONFIG/PLUGINS IF FRESH INSTALL
+      // (If restoring, restoreSnapshotV2 already extracted them!)
+      // =========================================================
+      if (!selectedBackup) {
         updateSetupProgress("config", "Syncing config folder", 4, 7);
         const configResult = await window.electronAPI.downloadDriveFolder({
           accessToken,
@@ -369,7 +382,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           return;
         }
       } else {
-        updateSetupProgress("plugins", "Using mods/config/plugins from restored backup", 5, 7);
+        updateSetupProgress("plugins", "Using config/plugins from restored backup", 5, 7);
       }
 
       // 5. Minecraft server.jar

@@ -51,8 +51,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     mcVersion: string;
   }) => ipcRenderer.invoke("search-mods", args),
 
+  exportClientProfile: (args: any) => ipcRenderer.invoke("export-client-profile", args),
+
+  // Config Editor IPCs
+  pullLiveConfigs: (args: any) => ipcRenderer.invoke("pull-live-configs", args),
+  getConfigTree: (args: any) => ipcRenderer.invoke("get-config-tree", args),
+  readConfigFile: (args: any) => ipcRenderer.invoke("read-config-file", args),
+  saveConfigFile: (args: any) => ipcRenderer.invoke("save-config-file", args),
+  pushLiveConfigs: (args: any) => ipcRenderer.invoke("push-live-configs", args),
+
   getModpackMetadata: (args: { modpackId: string; provider: string }) => 
       ipcRenderer.invoke("get-modpack-metadata", args),
+
+  downloadDriveFileText: (args: { accessToken: string; fileId: string }) => 
+    ipcRenderer.invoke("download-drive-file-text", args),
 
   installModpack: (args: {
         serverId: string;
@@ -161,6 +173,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverId: string;
     loader: string;
     localDestination: string;
+    driveFolderId?: string;
+    isModpack?: boolean;
   }) => ipcRenderer.invoke("download-mods-to-folder", args),
 
   restoreSnapshot: (args: {
