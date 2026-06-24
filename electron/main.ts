@@ -3139,7 +3139,23 @@ function createWindow() {
   });
 }
 
+ipcMain.handle("downloadFromDrive", async (_event, args) => {
+  try {
+    const { fileId, destPath, accessToken } = args;
 
+    if (!fileId || !destPath || !accessToken) {
+      throw new Error("Missing required arguments for downloadFromDrive");
+    }
+
+    // Call the helper function that already exists in your main.ts
+    await downloadFileFromDrive(fileId, destPath, accessToken);
+
+    return { success: true };
+  } catch (error: any) {
+    console.error("Failed to download file from Drive:", error);
+    return { success: false, error: error.message || String(error) };
+  }
+});
 
 async function downloadFileFromDrive(driveZipId: string, destPath: string, accessToken: string) {
   const drive = createDriveClient(accessToken);
