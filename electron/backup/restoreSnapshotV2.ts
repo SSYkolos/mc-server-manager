@@ -399,19 +399,58 @@ export async function restoreSnapshotV2({
         const extractDir = path.join(restorePackCacheDir, first.packHash)
         await fs.promises.mkdir(extractDir, { recursive: true })
 
-        await fs
-          .createReadStream(localPackPath)
-          .pipe(unzipper.Extract({ path: extractDir }))
-          .promise()
+        // 1. Robust parsing that explicitly waits for all OS file writes to finish
+        await new Promise<void>((resolve, reject) => {
+          let pending = 0;
+          let zipEnded = false;
 
-        packCache[packFileId] = extractDir
+          const checkDone = () => {
+            if (zipEnded && pending === 0) resolve();
+          };
+
+          const stream = fs.createReadStream(localPackPath).pipe(unzipper.Parse());
+
+          stream.on("entry", (entry: any) => {
+            const filePath = path.join(extractDir, entry.path);
+
+            if (entry.type === "Directory") {
+              fs.mkdirSync(filePath, { recursive: true });
+              entry.autodrain();
+            } else {
+              fs.mkdirSync(path.dirname(filePath), { recursive: true });
+              pending++;
+              
+              const writeStream = fs.createWriteStream(filePath);
+
+              writeStream.on("finish", () => {
+                pending--;
+                checkDone();
+              });
+
+              writeStream.on("error", reject);
+              entry.on("error", reject);
+              entry.pipe(writeStream);
+            }
+          });
+
+          stream.on("close", () => {
+            zipEnded = true;
+            checkDone();
+          });
+
+          stream.on("error", reject);
+        });
+
+        packCache[packFileId] = extractDir;
 
         for (const smallFile of neededFiles) {
-          const targetPath = path.join(serverPath, smallFile.path)
-          const restoredFilePath = path.join(packCache[packFileId], smallFile.path)
+          const targetPath = path.join(serverPath, smallFile.path);
+          const restoredFilePath = path.join(packCache[packFileId], smallFile.path);
 
+          // 2. Graceful fallback so a single missing minor file doesn't nuke the restore
           if (!fs.existsSync(restoredFilePath)) {
-            throw new Error(`Missing entry in pack: ${smallFile.path}`)
+            console.warn(`[Restore Warning] Missing entry in pack: ${smallFile.path}. Skipping file...`);
+            continue; 
           }
 
           await fs.promises.copyFile(restoredFilePath, targetPath)

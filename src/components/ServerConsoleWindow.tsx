@@ -9,6 +9,7 @@ import { getAuth } from "firebase/auth";
 import { db } from "../firebase";
 import ServerPropertiesEditor from "./ServerPropertiesEditor";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import WebRTCHost from './WebRTCHost';
 
 
 type RouteParams = {
@@ -321,6 +322,8 @@ export default function ServerConsoleWindow() {
       const linkedDriveId = serverData?.linkedDriveId;
       const ownerId = serverData?.createdBy;
       const loader = serverData?.loader;
+      const driveFolderId = serverData?.driveFolderId;
+      const isModpack = serverData?.isModpack;
       const retention =
         typeof serverData?.backupRetentionCount === "number"
           ? serverData.backupRetentionCount
@@ -341,6 +344,8 @@ export default function ServerConsoleWindow() {
         loader,
         accessToken,
         retention,
+        driveFolderId,
+        isModpack,
       });
 
       if (!result.success) throw new Error(result.error);
@@ -349,6 +354,8 @@ export default function ServerConsoleWindow() {
         serverId,
         loader,
         accessToken,
+        driveFolderId,
+        isModpack,
       });
 
       const count = backups.length;
@@ -424,6 +431,7 @@ export default function ServerConsoleWindow() {
         forgeUnixArgsPath: runtimeInfo.unixArgsPath ?? null,
         serverFolder: extractPath,
         ram: safeRam,
+        mcVersion: mcVersion,
       });
 
       if (!result.success) {
@@ -524,6 +532,9 @@ export default function ServerConsoleWindow() {
                 <Typography variant="body2">PID: {pid ?? "-"}</Typography>
                 <Typography variant="body2">RAM: {ram || "-"}</Typography>
                 <Typography variant="body2">Uptime: {formatUptime(uptimeSec)}</Typography>
+
+                {/* WebRTC host */}
+                <WebRTCHost serverId={serverId} serverRunning={serverRunning} />
               </Box>
 
               <Typography

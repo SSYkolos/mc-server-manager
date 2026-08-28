@@ -1,5 +1,6 @@
 import React from "react";
 import { CreateServerSettingsProps } from "../types/types";
+import ModpackSearchModal from "./ModpackSearchModal";
 
 type CreateMode = "create" | "import-world" | "import-server";
 
@@ -9,6 +10,7 @@ type AccordionSectionProps = {
   children: React.ReactNode;
   defaultOpen?: boolean;
 };
+
 
 const AccordionSection: React.FC<AccordionSectionProps> = ({
   title,
@@ -74,6 +76,9 @@ export const CreateServerSettings: React.FC<Props> = ({
 }) => {
   const isImportWorld = mode === "import-world" || mode === "import-server";
 
+  const [isSearchModalOpen, setIsSearchModalOpen] = React.useState(false);
+  const [isFetchingMeta, setIsFetchingMeta] = React.useState(false);
+
   return (
     <>
       <AccordionSection
@@ -116,95 +121,167 @@ export const CreateServerSettings: React.FC<Props> = ({
         title="Loader & Version"
         subtitle="Choose the server software and Minecraft version."
       >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Field label="Loader">
-            <select
-              value={value.loader}
-              onChange={(e) => update("loader", e.target.value)}
-              className={textInputClass}
-            >
-              <option value="vanilla">Vanilla</option>
-              <option value="paper">Paper</option>
-              <option value="purpur">Purpur</option>
-              <option value="fabric">Fabric</option>
-              <option value="forge">Forge</option>
-              <option value="neoforge">NeoForge</option>
-            </select>
-          </Field>
-
-          <Field
-            label="Minecraft Version"
-            hint="Required for both fresh servers and world import."
-          >
-            <input
-              type="text"
-              value={value.mcVersion ?? ""}
-              onChange={(e) => update("mcVersion", e.target.value)}
-              className={textInputClass}
-              placeholder="e.g. 1.21.10"
-            />
-          </Field>
-
-          <Field
-            label="Loader Version"
-            hint={
-              value.loader === "fabric"
-                ? "Required for Fabric."
-                : value.loader === "forge"
-                ? "Choose a Forge build that matches the selected Minecraft version."
-                : value.loader === "neoforge"
-                ? "Use the matching loader/build version."
-                : "Usually not needed."
-            }
-          >
-            {value.loader === "forge" ? (
-              <select
-                value={value.loaderVersion ?? ""}
-                onChange={(e) => update("loaderVersion", e.target.value)}
-                className={textInputClass}
-                disabled={!value.mcVersion?.trim() || loadingForgeVersions}
-              >
-                {!value.mcVersion?.trim() ? (
-                  <option value="">Select Minecraft version first</option>
-                ) : loadingForgeVersions ? (
-                  <option value="">Loading Forge versions...</option>
-                ) : forgeVersions.length === 0 ? (
-                  <option value="">No Forge versions found</option>
-                ) : (
-                  forgeVersions.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))
-                )}
-              </select>
-            ) : (
+        <div className="space-y-4">
+          
+          {/* CLEAN MODPACK CHECKBOX */}
+          {mode === "create" && (
+            <div className={checkboxRowClass}>
               <input
-                type="text"
-                value={value.loaderVersion ?? ""}
-                onChange={(e) => update("loaderVersion", e.target.value)}
-                className={`${textInputClass} ${
-                  value.loader === "vanilla" ||
-                  value.loader === "paper" ||
-                  value.loader === "purpur"
-                    ? "bg-gray-100 text-gray-400"
-                    : ""
-                }`}
-                placeholder={
-                  value.loader === "fabric"
-                    ? "e.g. 0.16.10"
-                    : value.loader === "neoforge"
-                    ? "e.g. loader/build version"
-                    : "Usually not needed"
-                }
-                disabled={
-                  value.loader === "vanilla" ||
-                  value.loader === "paper" ||
-                  value.loader === "purpur"
-                }
+                type="checkbox"
+                id="isModpack"
+                checked={value.isModpack || false}
+                onChange={(e) => {
+                  update("isModpack", e.target.checked);
+                  if (e.target.checked) {
+                    update("mcVersion", "");
+                    update("loader", "vanilla");
+                    update("loaderVersion", "");
+                  }
+                }}
+                className="w-4 h-4 text-blue-600 rounded cursor-pointer"
               />
-            )}
-          </Field>
+              <label htmlFor="isModpack" className="text-sm font-medium text-gray-800 cursor-pointer select-none">
+                Modpack based server
+              </label>
+            </div>
+          )}
+
+          {/* THE MODPACK TAB AREA */}
+          {value.isModpack ? (
+            <div className="py-2">
+              {!value.modpackId ? (
+                // State 1: Nothing selected yet (Big Plus Button)
+                <button
+                  type="button"
+                  onClick={() => setIsSearchModalOpen(true)}
+                  className="w-full flex flex-col items-center justify-center gap-2 py-8 border-2 border-dashed border-gray-300 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition text-gray-500 hover:text-blue-600 bg-white"
+                >
+                  <span className="text-4xl font-light">+</span>
+                  <span className="font-medium">Browse Modpacks</span>
+                </button>
+              ) : (
+                // State 2: Modpack selected successfully
+                <div className="flex items-center justify-between p-4 bg-green-50 border border-green-200 rounded-xl shadow-sm">
+                  <div>
+                    <div className="text-sm font-bold text-green-800">
+                      Modpack ID: {value.modpackId}
+                    </div>
+                    <div className="text-xs text-green-600 uppercase tracking-wide mt-1">
+                      Source: {value.modpackProvider}
+                    </div>
+                    {isFetchingMeta ? (
+                       <div className="text-xs text-gray-500 mt-1 animate-pulse">Detecting game version...</div>
+                    ) : value.mcVersion && (
+                       <div className="text-xs text-gray-700 mt-1 font-medium">
+                         Locked to: {value.loader} {value.mcVersion}
+                       </div>
+                    )}
+                  </div>
+                  
+                  <button
+                    type="button"
+                    onClick={() => setIsSearchModalOpen(true)}
+                    className="px-4 py-2 bg-white border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+                  >
+                    Change
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            
+            /* NORMAL VERSION GRID (Hidden if Modpack is checked) */
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <Field label="Loader">
+                <select
+                  value={value.loader}
+                  onChange={(e) => update("loader", e.target.value)}
+                  className={textInputClass}
+                >
+                  <option value="vanilla">Vanilla</option>
+                  <option value="paper">Paper</option>
+                  <option value="purpur">Purpur</option>
+                  <option value="fabric">Fabric</option>
+                  <option value="forge">Forge</option>
+                  <option value="neoforge">NeoForge</option>
+                </select>
+              </Field>
+
+              <Field
+                label="Minecraft Version"
+                hint="Required for both fresh servers and world import."
+              >
+                <input
+                  type="text"
+                  value={value.mcVersion ?? ""}
+                  onChange={(e) => update("mcVersion", e.target.value)}
+                  className={textInputClass}
+                  placeholder="e.g. 1.21.10"
+                />
+              </Field>
+
+              <Field
+                label="Loader Version"
+                hint={
+                  value.loader === "fabric"
+                    ? "Required for Fabric."
+                    : value.loader === "forge"
+                    ? "Choose a Forge build that matches the selected Minecraft version."
+                    : value.loader === "neoforge"
+                    ? "Use the matching loader/build version."
+                    : "Usually not needed."
+                }
+              >
+                {value.loader === "forge" ? (
+                  <select
+                    value={value.loaderVersion ?? ""}
+                    onChange={(e) => update("loaderVersion", e.target.value)}
+                    className={textInputClass}
+                    disabled={!value.mcVersion?.trim() || loadingForgeVersions}
+                  >
+                    {!value.mcVersion?.trim() ? (
+                      <option value="">Select Minecraft version first</option>
+                    ) : loadingForgeVersions ? (
+                      <option value="">Loading Forge versions...</option>
+                    ) : forgeVersions.length === 0 ? (
+                      <option value="">No Forge versions found</option>
+                    ) : (
+                      forgeVersions.map((version) => (
+                        <option key={version} value={version}>
+                          {version}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={value.loaderVersion ?? ""}
+                    onChange={(e) => update("loaderVersion", e.target.value)}
+                    className={`${textInputClass} ${
+                      value.loader === "vanilla" ||
+                      value.loader === "paper" ||
+                      value.loader === "purpur"
+                        ? "bg-gray-100 text-gray-400"
+                        : ""
+                    }`}
+                    placeholder={
+                      value.loader === "fabric"
+                        ? "e.g. 0.16.10"
+                        : value.loader === "neoforge"
+                        ? "e.g. loader/build version"
+                        : "Usually not needed"
+                    }
+                    disabled={
+                      value.loader === "vanilla" ||
+                      value.loader === "paper" ||
+                      value.loader === "purpur"
+                    }
+                  />
+                )}
+              </Field>
+            </div>
+          )}
         </div>
       </AccordionSection>
 
@@ -475,8 +552,27 @@ export const CreateServerSettings: React.FC<Props> = ({
             />
             <span className="text-sm text-gray-800">Enable Server Status</span>
           </div>
+          
         </div>
       </AccordionSection>
+      {}
+      <ModpackSearchModal 
+        isOpen={isSearchModalOpen}
+        onClose={() => setIsSearchModalOpen(false)}
+        onSelect={async (modpackId, provider) => {
+          update("modpackId", modpackId);
+          update("modpackProvider", provider);
+          
+          setIsFetchingMeta(true);
+          const meta = await window.electronAPI.getModpackMetadata({ modpackId, provider });
+          if (meta.success) {
+            update("mcVersion", meta.mcVersion);
+            update("loader", meta.loader);
+            update("loaderVersion", meta.loaderVersion);
+          }
+          setIsFetchingMeta(false);
+        }}
+      />
     </>
   );
 };

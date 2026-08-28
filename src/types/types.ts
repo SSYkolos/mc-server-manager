@@ -111,6 +111,9 @@ export interface CreateServerSettingsProps {
     resourcePack: string;
     enableStatus: boolean;
     enableArchiveOnShutdown: boolean;
+    isModpack?: boolean;
+    modpackId?: string;
+    modpackProvider?: string;
   };
   update: (field: keyof CreateServerSettingsProps["value"], value: any) => void;
 }

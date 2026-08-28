@@ -1,0 +1,51 @@
+name: Build and Release MC Server Manager
+
+on:
+  push:
+    tags:
+      - 'v*' # This triggers the action only when you push a tag like "v1.0.6"
+
+jobs:
+  build-and-release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18 # Matches the version in your package.json types
+
+      - name: Install dependencies
+        run: npm install
+
+      # BUILD FOR WINDOWS
+      - name: Build Windows Installer
+        if: matrix.os == 'windows-latest'
+        run: npm run dist:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: false
+
+      # BUILD FOR MACOS
+      - name: Build macOS DMG
+        if: matrix.os == 'macos-latest'
+        run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: false
+
+      # UPLOAD FILES TO GITHUB RELEASE
+      - name: Upload Artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

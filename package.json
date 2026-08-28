@@ -1,6 +1,6 @@
 {
   "name": "mc-server-manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Minecraft server manager desktop app",
   "main": "dist-electron/main.js",
   "author": "",
@@ -14,7 +14,8 @@
     "build": "npm run build:react && npm run build:electron",
     "electron:dev": "cross-env NODE_ENV=development npm run build:electron && wait-on tcp:3000 && electron .",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder --win nsis"
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && electron-builder --mac dmg"
   },
   "build": {
     "extends": null,
@@ -56,6 +57,12 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.utilities"
     }
   },
   "dependencies": {
@@ -66,10 +73,11 @@
     "@mui/icons-material": "^7.2.0",
     "@mui/material": "^7.2.0",
     "archiver": "^7.0.1",
-    "axios": "^1.13.2",
+    "axios": "^1.18.0",
     "clsx": "^2.1.1",
     "cors": "^2.8.6",
     "date-fns": "^4.1.0",
+    "dotenv": "^17.4.2",
     "firebase": "^11.10.0",
     "googleapis": "^124.0.0",
     "got": "^11.8.6",
@@ -88,6 +96,7 @@
     "react-icons": "^5.5.0",
     "react-router-dom": "^7.6.2",
     "react-scripts": "^5.0.1",
+    "simple-peer": "^9.11.1",
     "tailwind-merge": "^3.3.1",
     "tailwind-variants": "^1.0.0",
     "unzipper": "^0.12.3"
@@ -104,12 +113,14 @@
     "@types/path-browserify": "^1.0.3",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/simple-peer": "^9.11.9",
     "@types/unzipper": "^0.10.11",
     "autoprefixer": "^10.4.17",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
+    "electron-reload": "^2.0.0-alpha.1",
     "esbuild": "^0.25.5",
     "eslint": "^8.57.1",
     "eslint-plugin-react": "^7.37.5",

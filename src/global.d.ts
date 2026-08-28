@@ -36,11 +36,29 @@ declare global {
         error?: string;
       }>;
 
+
+      installModpack: (args: {
+        serverId: string;
+        modpackId: string;
+        provider: string;
+        accessToken: string;
+        loader: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+
+      provisionModpack: (args: {
+        serverId: string;
+        modpackId: string;
+        provider: string;
+        accessToken: string;
+        driveFolderId: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+
       searchMods: (args: {
         provider: "modrinth" | "curseforge";
         query: string;
-        loader: string;
-        mcVersion: string;
+        loader?: string;
+        mcVersion?: string;
+        isModpack?: boolean;
       }) => Promise<{
         success: boolean;
         results: Array<{
@@ -154,6 +172,14 @@ declare global {
       }) => Promise<{
         success: boolean;
         players: string[];
+      }>;
+
+      getModpackMetadata: (args: { modpackId: string; provider: string }) => Promise<{
+        success: boolean;
+        mcVersion?: string;
+        loader?: string;
+        loaderVersion?: string; 
+        error?: string;
       }>;
 
       timeoutPlayers: (args: {
@@ -330,6 +356,8 @@ declare global {
         serverId: string;
         loader: string;
         accessToken: string;
+        driveFolderId?: string; // <-- ÚJ
+        isModpack?: boolean;    // <-- ÚJ
       }) => Promise<{ success: boolean; error?: string }>;
 
       moveDriveFileBetweenServerFolders: (args: {
@@ -455,6 +483,8 @@ declare global {
         loader: string;
         accessToken: string;
         retention?: number;
+        driveFolderId?: string;
+        isModpack?: boolean;
       }) => Promise<{ success: boolean; backups?: { name: string; id: string }[]; error?: string }>;
 
       getServerDriveUsage: (args: {
@@ -502,6 +532,8 @@ declare global {
         accessToken: string;
         serverId: string;
         loader: string;
+        driveFolderId?: string; // <-- ÚJ
+        isModpack?: boolean;    // <-- ÚJ
       }) => Promise<string>;
 
       createServerZip: (args: {
@@ -532,6 +564,8 @@ declare global {
         serverId: string;
         loader: string;
         accessToken: string;
+        driveFolderId?: string; // <-- ÚJ
+        isModpack?: boolean;    // <-- ÚJ
       }) => Promise<{ name: string; id: string }[]>;
 
 
@@ -554,6 +588,7 @@ declare global {
         serverFolder?: string | null;
         ram: string;
         preferredPort?: number;
+        mcVersion?: string;
       }) => Promise<{ success: boolean; error?: string; port?: number }>;
 
 
@@ -563,6 +598,8 @@ declare global {
         serverId: string;
         loader: string;
         accessToken: string;
+        driveFolderId?: string; // <-- ÚJ
+        isModpack?: boolean;    // <-- ÚJ
       }) => Promise<{
         success: boolean;
         alreadyRunning?: boolean;

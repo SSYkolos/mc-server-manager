@@ -98,6 +98,11 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         const data = serverSnap.data();
 
         const loaderFromDb = data.loader || "vanilla";
+        const isModpackFromDb = data.isModpack || false;
+        const driveFolderIdFromDb = data.driveFolderId;
+        // Intercept the Drive folder name
+        const driveCategoryFolder = isModpackFromDb ? "modpack" : loaderFromDb;
+        
         const mcVersionFromDb = data.mcVersion || "";
         const loaderVersionFromDb = data.loaderVersion || "";
         const linkedDriveId = data.linkedDriveId;
@@ -121,7 +126,9 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
 
         const list = await window.electronAPI.listServerBackups({
           serverId,
-          loader: loaderFromDb,
+          loader: driveCategoryFolder,
+          driveFolderId: driveFolderIdFromDb,
+          isModpack: isModpackFromDb,
           accessToken,
         });
 
@@ -194,8 +201,12 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
     const serverSnap = await getDoc(doc(db, "servers", serverId));
     if (!serverSnap.exists()) return;
 
-    const { loader, linkedDriveId, createdBy, driveFolderId } = serverSnap.data();
+    // Pull isModpack from the database
+    const { loader, linkedDriveId, createdBy, driveFolderId, isModpack } = serverSnap.data();
     if (!loader || !linkedDriveId || !createdBy || !driveFolderId) return;
+
+    // Intercept the Drive folder name
+    const driveCategoryFolder = isModpack ? "modpack" : loader;
 
     let accessToken = cachedAccessToken;
 
@@ -210,7 +221,9 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
     const serverRootFolderId = await window.electronAPI.ensureDriveFolderPath({
       accessToken,
       serverId,
-      loader,
+      loader: driveCategoryFolder,
+      driveFolderId,
+      isModpack,
     });
 
     if (backups.length > 0 && !selectedBackup) {
@@ -256,7 +269,9 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           snapshotId: selectedBackup.id,
           serverPath: extractPath,
           serverId,
-          loader,
+          loader: driveCategoryFolder,
+          driveFolderId,
+          isModpack,
           accessToken,
         });
 
@@ -267,7 +282,15 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         }
         updateSetupProgress("restore", "Backup restored", 1, 1);
 
-
+        void window.electronAPI.startRestoreVerification({
+          snapshotId: selectedBackup.id,
+          serverPath: extractPath,
+          serverId,
+          loader: driveCategoryFolder,
+          driveFolderId,
+          isModpack,
+          accessToken,
+        });
 
       } else {
         const zipFileId = await getZipFileId(serverId);

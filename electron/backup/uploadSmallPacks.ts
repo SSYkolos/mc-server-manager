@@ -9,6 +9,7 @@ export type PackIndexEntry = {
   fileId: string
   name: string
   size: number
+  timestamp?: number // <-- ADDED
   entriesByPath?: Record<
     string,
     {
@@ -90,7 +91,8 @@ export async function uploadSmallPacks({
       fileId,
       name: pack.fileName,
       size: stat.size,
-      entriesByPath: buildEntriesByPath(pack.entries)
+      entriesByPath: buildEntriesByPath(pack.entries),
+      timestamp: Date.now() // <-- ADDED
     }
 
     uploaded[index] = {
