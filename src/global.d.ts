@@ -245,6 +245,8 @@ declare global {
         serverSettingsOverride?: Record<string, any>;
         retention?: number;
         port?: number;
+        isModpack?: boolean;
+        driveFolderId?: string;
       }) => Promise<{
         success: boolean;
         error?: string;
@@ -277,6 +279,8 @@ declare global {
         extractPath: string;
         retention?: number;
         port?: number;
+        isModpack?: boolean;
+        driveFolderId?: string;
       }) => Promise<{
         success: boolean;
         error?: string;
@@ -516,7 +520,7 @@ declare global {
       downloadDriveFolder: (args: {
         accessToken: string;
         serverRootFolderId: string;
-        folderName: "mods" | "config" | "plugins";
+        folderName: "mods" | "config" | "plugins" | "kubejs" | "scripts" | "defaultconfigs";
         localDestination: string;
       }) => Promise<{
         success: boolean;

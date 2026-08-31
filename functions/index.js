@@ -5,6 +5,7 @@ const admin = require("firebase-admin");
 const functions = require("firebase-functions");
 const cors = require('cors')({ origin: true }); // Engedélyez minden origint, vagy írd be a localhostot
 const { google } = require("googleapis");
+const axios = require("axios");
 
 let db;
 
@@ -65,6 +66,27 @@ const handleDriveOAuth = onRequest({ region: "europe-west1" }, (req, res) => {
     }
   });
 });
+
+const curseforgeProxy = onRequest({ region: "europe-west1", secrets: ["CURSEFORGE_API_KEY"] }, (req, res) => {
+  return cors(req, res, async () => {
+    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+    try {
+      const { endpoint, params } = req.body;
+      const url = `https://api.curseforge.com${endpoint}`;
+      const response = await axios.get(url, {
+        headers: {
+          "x-api-key": process.env.CURSEFORGE_API_KEY,
+          "Accept": "application/json"
+        },
+        params: params 
+      });
+      return res.status(200).json(response.data);
+    } catch (error) {
+      return res.status(error.response?.status || 500).json(error.response?.data || { error: error.message });
+    }
+  });
+});
+
 
 
 // ----------------------------------------------------------------------
@@ -151,3 +173,4 @@ const acceptInvite = onCall(
 exports.handleDriveOAuth = handleDriveOAuth;
 exports.acceptInvite = acceptInvite;
 exports.refreshAccessToken = refreshAccessTokenApp.refreshAccessToken; 
+exports.curseforgeProxy = curseforgeProxy;

@@ -124,7 +124,7 @@ export const CreateServerSettings: React.FC<Props> = ({
         <div className="space-y-4">
           
           {/* CLEAN MODPACK CHECKBOX */}
-          {mode === "create" && (
+          {
             <div className={checkboxRowClass}>
               <input
                 type="checkbox"
@@ -144,10 +144,10 @@ export const CreateServerSettings: React.FC<Props> = ({
                 Modpack based server
               </label>
             </div>
-          )}
+          }
 
-          {/* THE MODPACK TAB AREA */}
-          {value.isModpack ? (
+          {/* THE MODPACK TAB AREA OR NORMAL GRID */}
+          {value.isModpack && mode === "create" ? (
             <div className="py-2">
               {!value.modpackId ? (
                 // State 1: Nothing selected yet (Big Plus Button)
@@ -189,97 +189,106 @@ export const CreateServerSettings: React.FC<Props> = ({
               )}
             </div>
           ) : (
-            
-            /* NORMAL VERSION GRID (Hidden if Modpack is checked) */
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <Field label="Loader">
-                <select
-                  value={value.loader}
-                  onChange={(e) => update("loader", e.target.value)}
-                  className={textInputClass}
-                >
-                  <option value="vanilla">Vanilla</option>
-                  <option value="paper">Paper</option>
-                  <option value="purpur">Purpur</option>
-                  <option value="fabric">Fabric</option>
-                  <option value="forge">Forge</option>
-                  <option value="neoforge">NeoForge</option>
-                </select>
-              </Field>
+            /* NORMAL VERSION GRID (Shown if NOT Modpack, OR if Importing a Modpack) */
+            <div className="space-y-4 mt-2">
+              
+              {/* Helpful notice for users importing a modpack */}
+              {value.isModpack && mode !== "create" && (
+                <div className="p-3 text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded">
+                  <strong>Importing local modpack:</strong> Please specify the underlying Minecraft version and loader this pack uses so the server knows how to boot it.
+                </div>
+              )}
 
-              <Field
-                label="Minecraft Version"
-                hint="Required for both fresh servers and world import."
-              >
-                <input
-                  type="text"
-                  value={value.mcVersion ?? ""}
-                  onChange={(e) => update("mcVersion", e.target.value)}
-                  className={textInputClass}
-                  placeholder="e.g. 1.21.10"
-                />
-              </Field>
-
-              <Field
-                label="Loader Version"
-                hint={
-                  value.loader === "fabric"
-                    ? "Required for Fabric."
-                    : value.loader === "forge"
-                    ? "Choose a Forge build that matches the selected Minecraft version."
-                    : value.loader === "neoforge"
-                    ? "Use the matching loader/build version."
-                    : "Usually not needed."
-                }
-              >
-                {value.loader === "forge" ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <Field label="Loader">
                   <select
-                    value={value.loaderVersion ?? ""}
-                    onChange={(e) => update("loaderVersion", e.target.value)}
+                    value={value.loader}
+                    onChange={(e) => update("loader", e.target.value)}
                     className={textInputClass}
-                    disabled={!value.mcVersion?.trim() || loadingForgeVersions}
                   >
-                    {!value.mcVersion?.trim() ? (
-                      <option value="">Select Minecraft version first</option>
-                    ) : loadingForgeVersions ? (
-                      <option value="">Loading Forge versions...</option>
-                    ) : forgeVersions.length === 0 ? (
-                      <option value="">No Forge versions found</option>
-                    ) : (
-                      forgeVersions.map((version) => (
-                        <option key={version} value={version}>
-                          {version}
-                        </option>
-                      ))
-                    )}
+                    <option value="vanilla">Vanilla</option>
+                    <option value="paper">Paper</option>
+                    <option value="purpur">Purpur</option>
+                    <option value="fabric">Fabric</option>
+                    <option value="forge">Forge</option>
+                    <option value="neoforge">NeoForge</option>
                   </select>
-                ) : (
+                </Field>
+
+                <Field
+                  label="Minecraft Version"
+                  hint="Required for both fresh servers and world import."
+                >
                   <input
                     type="text"
-                    value={value.loaderVersion ?? ""}
-                    onChange={(e) => update("loaderVersion", e.target.value)}
-                    className={`${textInputClass} ${
-                      value.loader === "vanilla" ||
-                      value.loader === "paper" ||
-                      value.loader === "purpur"
-                        ? "bg-gray-100 text-gray-400"
-                        : ""
-                    }`}
-                    placeholder={
-                      value.loader === "fabric"
-                        ? "e.g. 0.16.10"
-                        : value.loader === "neoforge"
-                        ? "e.g. loader/build version"
-                        : "Usually not needed"
-                    }
-                    disabled={
-                      value.loader === "vanilla" ||
-                      value.loader === "paper" ||
-                      value.loader === "purpur"
-                    }
+                    value={value.mcVersion ?? ""}
+                    onChange={(e) => update("mcVersion", e.target.value)}
+                    className={textInputClass}
+                    placeholder="e.g. 1.21.10"
                   />
-                )}
-              </Field>
+                </Field>
+
+                <Field
+                  label="Loader Version"
+                  hint={
+                    value.loader === "fabric"
+                      ? "Required for Fabric."
+                      : value.loader === "forge"
+                      ? "Choose a Forge build that matches the selected Minecraft version."
+                      : value.loader === "neoforge"
+                      ? "Use the matching loader/build version."
+                      : "Usually not needed."
+                  }
+                >
+                  {value.loader === "forge" ? (
+                    <select
+                      value={value.loaderVersion ?? ""}
+                      onChange={(e) => update("loaderVersion", e.target.value)}
+                      className={textInputClass}
+                      disabled={!value.mcVersion?.trim() || loadingForgeVersions}
+                    >
+                      {!value.mcVersion?.trim() ? (
+                        <option value="">Select Minecraft version first</option>
+                      ) : loadingForgeVersions ? (
+                        <option value="">Loading Forge versions...</option>
+                      ) : forgeVersions.length === 0 ? (
+                        <option value="">No Forge versions found</option>
+                      ) : (
+                        forgeVersions.map((version) => (
+                          <option key={version} value={version}>
+                            {version}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={value.loaderVersion ?? ""}
+                      onChange={(e) => update("loaderVersion", e.target.value)}
+                      className={`${textInputClass} ${
+                        value.loader === "vanilla" ||
+                        value.loader === "paper" ||
+                        value.loader === "purpur"
+                          ? "bg-gray-100 text-gray-400"
+                          : ""
+                      }`}
+                      placeholder={
+                        value.loader === "fabric"
+                          ? "e.g. 0.16.10"
+                          : value.loader === "neoforge"
+                          ? "e.g. loader/build version"
+                          : "Usually not needed"
+                      }
+                      disabled={
+                        value.loader === "vanilla" ||
+                        value.loader === "paper" ||
+                        value.loader === "purpur"
+                      }
+                    />
+                  )}
+                </Field>
+              </div>
             </div>
           )}
         </div>

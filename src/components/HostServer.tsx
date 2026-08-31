@@ -135,7 +135,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
         console.log("BACKUPS FROM DRIVE:", list);
 
         if (list.length > 0) {
-          console.log("SETTING DEFAULT BACKUP:", list[0]);
+          console.log("SETTING DEFAULT BACKUP TO LATEST:", list[0]);
           setBackups(list);
           setSelectedBackup(list[0]);
         } else {
@@ -226,10 +226,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
       isModpack,
     });
 
-    if (backups.length > 0 && !selectedBackup) {
-      alert("Backup is available but none is selected yet. Please wait or select one.");
-      return;
-    }
+
 
     if (!installPath) {
       alert("Please select an install path");
@@ -249,7 +246,7 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
     });
 
     setSetupProgressOpen(true);
-    const totalSteps = selectedBackup ? 5 : 7;
+    const totalSteps = selectedBackup ? 5 : 10;
     updateSetupProgress("idle", "Preparing host setup", 0, totalSteps);
     setLoading(true);
 
@@ -292,33 +289,43 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           accessToken,
         });
 
-      } else {
+} else {
         const zipFileId = await getZipFileId(serverId);
+        
         if (!zipFileId) {
-          alert("Could not find zip file ID for this server.");
-          setLoading(false);
-          return;
-        }
+          // HA MODPACK, AKKOR NINCS SZÜKSÉG ALAP ZIP-RE!
+          if (isModpack) {
+            console.log("Modpack detected without base zip. Skipping extraction phase.");
+            updateSetupProgress("download-zip", "No base zip needed for modpack", 1, totalSteps);
+            updateSetupProgress("extract-zip", "Skipping zip extraction", 2, totalSteps);
+          } else {
+            alert("Could not find zip file ID for this server.");
+            setLoading(false);
+            return;
+          }
+        } else {
+          // HA VAN ZIP (PL. VANILLA SZERVER), AKKOR LETÖLTJÜK
+          const zipLocalPath = path.join(installPath, `${serverId}.zip`);
+          updateSetupProgress("download-zip", "Downloading server archive", 1, totalSteps);
+          const downloadResult = await window.electronAPI.downloadFromDrive({
+            fileId: zipFileId,
+            destPath: zipLocalPath,
+            accessToken,
+          });
 
-        const zipLocalPath = path.join(installPath, `${serverId}.zip`);
-        updateSetupProgress("download-zip", "Downloading server archive", 1, 7);
-        const downloadResult = await window.electronAPI.downloadFromDrive({
-          fileId: zipFileId,
-          destPath: zipLocalPath,
-          accessToken,
-        });
-
-        if (!downloadResult.success) {
-          alert(`Failed to download server zip: ${downloadResult.error}`);
-          setLoading(false);
-          return;
-        }
-        updateSetupProgress("extract-zip", "Extracting server archive", 2, 7);
-        const extractResult = await window.electronAPI.extractZip(zipLocalPath, extractPath);
-        if (!extractResult) {
-          alert("Failed to extract the zip file.");
-          setLoading(false);
-          return;
+          if (!downloadResult.success) {
+            alert(`Failed to download server zip: ${downloadResult.error}`);
+            setLoading(false);
+            return;
+          }
+          
+          updateSetupProgress("extract-zip", "Extracting server archive", 2, totalSteps);
+          const extractResult = await window.electronAPI.extractZip(zipLocalPath, extractPath);
+          if (!extractResult) {
+            alert("Failed to extract the zip file.");
+            setLoading(false);
+            return;
+          }
         }
       }
 
@@ -362,6 +369,42 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           folderName: "plugins",
           localDestination: pluginsPath,
         });
+
+        // --- EXTRA MODPACK MAPPÁK LETÖLTÉSE ---
+        
+        updateSetupProgress("config", "Syncing kubejs folder", 6, 10);
+        const kubejsPath = path.join(extractPath, "kubejs");
+        await window.electronAPI.downloadDriveFolder({
+          accessToken,
+          serverRootFolderId,
+          folderName: "kubejs",
+          localDestination: kubejsPath,
+        });
+
+        updateSetupProgress("config", "Syncing scripts folder", 7, 10);
+        const scriptsPath = path.join(extractPath, "scripts");
+        await window.electronAPI.downloadDriveFolder({
+          accessToken,
+          serverRootFolderId,
+          folderName: "scripts",
+          localDestination: scriptsPath,
+        });
+
+        updateSetupProgress("config", "Syncing defaultconfigs folder", 8, 10);
+        const defaultConfigsPath = path.join(extractPath, "defaultconfigs");
+        await window.electronAPI.downloadDriveFolder({
+          accessToken,
+          serverRootFolderId,
+          folderName: "defaultconfigs",
+          localDestination: defaultConfigsPath,
+        });
+
+        // Ezt a kettőt pedig frissítsd a megfelelő sorszámra (9 és 10):
+        updateSetupProgress("runtime", "Preparing server runtime", 9, 10);
+        // ... runtimeResult kód ...
+
+        updateSetupProgress("eula", "Creating eula.txt", 10, 10);
+        // ... eulaResult kód ...
 
         if (!pluginsResult.success) {
           alert(`Failed to download plugins folder: ${pluginsResult.error}`);
@@ -539,17 +582,24 @@ export default function HostServer({ serverId, user, onClose, onExtractPathReady
           <div className="mb-2">
             <label className="block text-sm font-medium">Restore from backup</label>
             <select
-              value={selectedBackup?.id ?? ""}
+              value={selectedBackup?.id ?? "none"}
               onChange={(e) => {
-                const found = backups.find(b => b.id === e.target.value);
-                setSelectedBackup(found ?? null);
+                if (e.target.value === "none") {
+                  setSelectedBackup(null);
+                } else {
+                  const found = backups.find(b => b.id === e.target.value);
+                  setSelectedBackup(found ?? null);
+                }
               }}
-
               className="border rounded px-2 py-1 w-full"
             >
-              {backups.map((backup) => (
+              {/* Opcionális vészfék, ha valaki mégsem akar visszaállítani */}
+              <option value="none">-- Do not restore (Fresh start) --</option>
+              
+              {/* A mentések listája (a legelső lesz az alapértelmezett) */}
+              {backups.map((backup, index) => (
                 <option key={backup.id} value={backup.id}>
-                  {backup.name}
+                  {backup.name} {index === 0 ? "(Latest)" : ""}
                 </option>
               ))}
             </select>

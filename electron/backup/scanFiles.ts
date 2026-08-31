@@ -29,6 +29,22 @@ const INCLUDE = [
   "banned-ips.json",
   "banned-players.json",
   "usercache.json",
+  "eula.txt",
+  "server.properties",
+  "server-icon.png",
+  // Modpack és plugin alapok
+  "mods",
+  "config",
+  "plugins",
+  "libraries",
+  // Speciális modpack mappák
+  "kubejs",
+  "scripts",
+  "defaultconfigs",
+  "patchouli_books",
+  "global_packs",
+  "openloader",
+  "structures"
 ]
 
 function normalizeRel(rel: string) {

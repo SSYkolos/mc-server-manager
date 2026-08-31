@@ -359,34 +359,57 @@ async function uploadLocalFolderToDriveRecursive(args: {
   const entries = await fs.promises.readdir(localSourcePath, { withFileTypes: true });
   let uploadedCount = 0;
 
-  for (const entry of entries) {
-    const localPath = path.join(localSourcePath, entry.name);
+  const folders = entries.filter(e => e.isDirectory());
+  const files = entries.filter(e => e.isFile());
 
-    if (entry.isDirectory()) {
-      const childFolderId = await getOrCreateChildFolderId(drive, parentFolderId, entry.name);
-      uploadedCount += await uploadLocalFolderToDriveRecursive({
-        drive,
-        parentFolderId: childFolderId,
-        localSourcePath: localPath,
-      });
-      continue;
-    }
-
-    if (!entry.isFile()) continue;
-
-    const existing = await drive.files.list({
-      q: `'${parentFolderId}' in parents and name='${entry.name.replace(/'/g, "\\'")}' and trashed=false`,
-      fields: "files(id, name)",
-      pageSize: 50,
+  // 1. Mappák feldolgozása (Itt maradhatunk sorban, mert mappából kevés van)
+  for (const folder of folders) {
+    const localPath = path.join(localSourcePath, folder.name);
+    const childFolderId = await getOrCreateChildFolderId(drive, parentFolderId, folder.name);
+    uploadedCount += await uploadLocalFolderToDriveRecursive({
+      drive,
+      parentFolderId: childFolderId,
+      localSourcePath: localPath,
     });
+  }
 
-    for (const oldFile of existing.data.files ?? []) {
-      await drive.files.delete({ fileId: oldFile.id! });
+  // 2. OPTIMALIZÁCIÓ: Lekérjük az összes már létező fájlt egyetlen API hívással!
+  const existingFilesMap = new Map<string, string[]>();
+  try {
+    const res = await drive.files.list({
+      q: `'${parentFolderId}' in parents and trashed=false`,
+      fields: "files(id, name)",
+      pageSize: 1000,
+    });
+    for (const f of res.data.files ?? []) {
+      if (f.name && f.id) {
+        const arr = existingFilesMap.get(f.name) || [];
+        arr.push(f.id);
+        existingFilesMap.set(f.name, arr);
+      }
+    }
+  } catch (err) {
+    // Ha nem sikerül lekérni, ignoráljuk
+  }
+
+  // 3. Fájlok feltöltése KONKURENS RAJ (Swarm) módban (25 fájl egyszerre!)
+  await runWithConcurrency(files, 25, async (file) => {
+    const localPath = path.join(localSourcePath, file.name);
+
+    // Ha a fájl már létezik, azonnal töröljük
+    const existingIds = existingFilesMap.get(file.name) || [];
+    for (const oldId of existingIds) {
+      try {
+        await drive.files.delete({ fileId: oldId });
+      } catch (e) {
+        // Hiba ignorálása
+      }
     }
 
+    // A fájl nyers, gyors feltöltése
     await drive.files.create({
       requestBody: {
-        name: entry.name,
+        name: file.name,
         parents: [parentFolderId],
       },
       media: {
@@ -396,7 +419,8 @@ async function uploadLocalFolderToDriveRecursive(args: {
     });
 
     uploadedCount += 1;
-  }
+    console.log(`[Import Sync] Fast Uploaded to Drive: ${file.name}`);
+  });
 
   return uploadedCount;
 }
@@ -875,10 +899,8 @@ ipcMain.handle("search-mods", async (_event, args) => {
       return { success: true, results };
     }
 
-    // --- CURSEFORGE SEARCH LOGIC ---
+// --- CURSEFORGE SEARCH LOGIC ---
     if (provider === "curseforge") {
-      const CURSEFORGE_API_KEY = process.env.CURSEFORGE_API_KEY;
-
       let modLoaderType = 0;
       const lowerLoader = String(loader || "").toLowerCase();
       if (lowerLoader === "forge") modLoaderType = 1;
@@ -886,40 +908,21 @@ ipcMain.handle("search-mods", async (_event, args) => {
       else if (lowerLoader === "quilt") modLoaderType = 5;
       else if (lowerLoader === "neoforge") modLoaderType = 6;
 
-      const cfUrl = new URL("https://api.curseforge.com/v1/mods/search");
-      cfUrl.searchParams.set("gameId", "432");
-
-      // 3. Dynamically switch CurseForge Class ID (6 = Mods, 4471 = Modpacks)
-      const targetClassId = isModpack ? "4471" : "6";
-      cfUrl.searchParams.set("classId", targetClassId);
-
-      cfUrl.searchParams.set("searchFilter", trimmedQuery);
-
-      cfUrl.searchParams.set("sortField", "2"); // 2 means sort by Popularity
-      cfUrl.searchParams.set("sortOrder", "desc"); // Put the highest numbers at the top
+      const params: any = {
+        gameId: 432,
+        classId: isModpack ? 4471 : 6,
+        searchFilter: trimmedQuery,
+        sortField: 2,
+        sortOrder: "desc"
+      };
 
       if (!isModpack) {
-        if (normalizedMcVersion) cfUrl.searchParams.set("gameVersion", normalizedMcVersion);
-        if (modLoaderType > 0) cfUrl.searchParams.set("modLoaderType", String(modLoaderType));
+        if (normalizedMcVersion) params.gameVersion = normalizedMcVersion;
+        if (modLoaderType > 0) params.modLoaderType = modLoaderType;
       }
 
-      if (!CURSEFORGE_API_KEY) {
-        throw new Error("Missing environment variable: CURSEFORGE_API_KEY (set it in your .env)");
-      }
-
-      const res = await fetch(cfUrl.toString(), {
-        headers: {
-          Accept: "application/json",
-          "x-api-key": CURSEFORGE_API_KEY,
-          "User-Agent": "MC_Manager_App/1.0",
-        },
-      });
-
-
-
-      if (!res.ok) throw new Error(`CurseForge search failed: ${res.status}`);
-
-      const data = await res.json();
+      // Route through our new Cloud Function proxy
+      const data = await fetchCurseForge("/v1/mods/search", params);
 
       const results = (data.data || []).map((mod: any) => ({
         id: String(mod.id),
@@ -1011,15 +1014,15 @@ ipcMain.handle("get-modpack-metadata", async (event, args: { modpackId: string; 
     } 
     else if (safeProvider === "curseforge") {
       console.log(`[Meta] Fetching CurseForge metadata for ${modpackId}...`);
-      const cfHeaders = { "x-api-key": process.env.CURSEFORGE_API_KEY, "Accept": "application/json" };
-      const packRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}`, { headers: cfHeaders });
-      const modData = packRes.data.data;
+      
+      const packRes = await fetchCurseForge(`/v1/mods/${modpackId}`);
+      const modData = packRes.data;
       const fileId = modData.mainFileId || modData.latestFiles[0]?.id;
 
       let downloadUrl = null;
       try {
-        const dlRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}/files/${fileId}/download-url`, { headers: cfHeaders });
-        downloadUrl = dlRes.data.data;
+        const dlRes = await fetchCurseForge(`/v1/mods/${modpackId}/files/${fileId}/download-url`);
+        downloadUrl = dlRes.data;
       } catch (err) {
         downloadUrl = modData.latestFiles.find((f: any) => f.id === fileId)?.downloadUrl;
       }
@@ -1033,6 +1036,7 @@ ipcMain.handle("get-modpack-metadata", async (event, args: { modpackId: string; 
         const tempExtPath = path.join(app.getPath("temp"), `meta-ext-${Date.now()}`);
 
         const writer = fs.createWriteStream(tempZipPath);
+        // Direct download from CDN (no API key needed!)
         const zipRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
         zipRes.data.pipe(writer);
         
@@ -1103,32 +1107,58 @@ async function mapFoldersAndCollectFiles(localPath: string, driveParentId: strin
 /**
  * Unleashes a concurrent swarm of uploads (e.g., 15 at a time)
  */
+/**
+ * Unleashes a concurrent swarm of uploads (optimized for tiny files)
+ */
 async function uploadSwarm(jobs: any[], concurrency: number, accessToken: string) {
   let completed = 0;
   const pool = new Set<Promise<void>>();
+  const drive = createDriveClient(accessToken); // Initialize Drive client for fast uploads
 
   for (const job of jobs) {
-    const promise = uploadResumableToDrive({
-      accessToken,
-      filePath: job.localPath,
-      fileName: job.fileName,
-      parentId: job.driveParentId,
-      onProgress: () => {} // Silence the individual progress spam
-    }).then(() => {
-      completed++;
-      // Log progress every 50 files so we don't lag the terminal
-      if (completed % 50 === 0 || completed === jobs.length) {
-        console.log(`[Provision] Fast Upload: ${completed} / ${jobs.length} files complete...`);
+    const promise = (async () => {
+      const stat = fs.statSync(job.localPath);
+      
+      // If the file is under 5MB, blast it in a single fast request
+      if (stat.size < 5 * 1024 * 1024) {
+        await drive.files.create({
+          requestBody: {
+            name: job.fileName,
+            parents: [job.driveParentId],
+          },
+          media: {
+            body: fs.createReadStream(job.localPath),
+          },
+          fields: "id",
+        });
+      } else {
+        // If it's a massive mod jar, fall back to the safe Resumable Uploader
+        await uploadResumableToDrive({
+          accessToken,
+          filePath: job.localPath,
+          fileName: job.fileName,
+          parentId: job.driveParentId,
+          onProgress: () => {}, // Silence individual progress spam
+        });
       }
-    }).catch(err => {
-      console.error(`[Provision] Failed to upload ${job.fileName}:`, err.message);
-    }).finally(() => {
-      pool.delete(promise);
-    });
+    })()
+      .then(() => {
+        completed++;
+        // Log progress every 50 files so we don't lag the terminal
+        if (completed % 50 === 0 || completed === jobs.length) {
+          console.log(`[Provision] Fast Upload: ${completed} / ${jobs.length} files complete...`);
+        }
+      })
+      .catch((err) => {
+        console.error(`[Provision] Failed to upload ${job.fileName}:`, err.message);
+      })
+      .finally(() => {
+        pool.delete(promise);
+      });
 
     pool.add(promise);
 
-    // If our pool hits the concurrency limit (e.g. 15), wait for one to finish before adding another
+    // Wait if we hit the concurrency cap
     if (pool.size >= concurrency) {
       await Promise.race(pool);
     }
@@ -1159,18 +1189,17 @@ ipcMain.handle("provision-modpack", async (event, args: {
     // ==========================================
     // PHASE 1: DOWNLOAD & EXTRACT MODPACK
     // ==========================================
-    if (safeProvider === "curseforge") {
+if (safeProvider === "curseforge") {
       console.log(`[Provision] Starting CurseForge download for ${modpackId}...`);
-      const cfHeaders = { "x-api-key": process.env.CURSEFORGE_API_KEY, "Accept": "application/json" };
       
-      const packRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}`, { headers: cfHeaders });
-      const modData = packRes.data.data;
+      const packRes = await fetchCurseForge(`/v1/mods/${modpackId}`);
+      const modData = packRes.data;
       const fileId = modData.mainFileId || modData.latestFiles[0]?.id;
       
       let downloadUrl = null;
       try {
-        const dlRes = await axios.get(`https://api.curseforge.com/v1/mods/${modpackId}/files/${fileId}/download-url`, { headers: cfHeaders });
-        downloadUrl = dlRes.data.data;
+        const dlRes = await fetchCurseForge(`/v1/mods/${modpackId}/files/${fileId}/download-url`);
+        downloadUrl = dlRes.data;
       } catch (err) {
         downloadUrl = modData.latestFiles.find((f: any) => f.id === fileId)?.downloadUrl;
       }
@@ -1182,18 +1211,16 @@ ipcMain.handle("provision-modpack", async (event, args: {
 
       console.log("[Provision] Downloading and Extracting zip...");
       const writer = fs.createWriteStream(packZipPath);
+      // Direct CDN download
       const zipRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
       zipRes.data.pipe(writer);
       
-      // FIX 1: Wait for actual OS file close
       await new Promise((resolve, reject) => { 
         writer.on('close', resolve); 
         writer.on('error', reject); 
       });
 
       await fs.createReadStream(packZipPath).pipe(unzipper.Extract({ path: packExtractPath })).promise();
-      
-      // FIX 2: Buffer for Windows file system
       await new Promise(res => setTimeout(res, 100));
 
       const manifestPath = path.join(packExtractPath, "manifest.json");
@@ -1204,13 +1231,14 @@ ipcMain.handle("provision-modpack", async (event, args: {
       console.log(`[Provision] Fetching ${manifest.files?.length || 0} mods...`);
       for (const file of manifest.files || []) {
         try {
-          const fileRes = await axios.get(`https://api.curseforge.com/v1/mods/${file.projectID}/files/${file.fileID}/download-url`, { headers: cfHeaders });
-          if (fileRes.data.data) {
-            const modName = fileRes.data.data.split('/').pop() || `mod-${file.fileID}.jar`;
+          const fileRes = await fetchCurseForge(`/v1/mods/${file.projectID}/files/${file.fileID}/download-url`);
+          if (fileRes.data) {
+            const modName = fileRes.data.split('/').pop() || `mod-${file.fileID}.jar`;
             const modWriter = fs.createWriteStream(path.join(modsFolder, modName));
-            const modStreamRes = await axios({ url: fileRes.data.data, method: 'GET', responseType: 'stream' });
+            // Direct CDN download
+            const modStreamRes = await axios({ url: fileRes.data, method: 'GET', responseType: 'stream' });
             modStreamRes.data.pipe(modWriter);
-            await new Promise(resolve => modWriter.on('finish', resolve)); // Individual mod jars are okay on 'finish'
+            await new Promise(resolve => modWriter.on('finish', resolve));
           }
         } catch (err) {
           console.error(`[Provision] Skipping blocked mod ID ${file.projectID}`);
@@ -1223,7 +1251,8 @@ ipcMain.handle("provision-modpack", async (event, args: {
       fs.rmSync(packZipPath, { force: true });
       fs.rmSync(packExtractPath, { recursive: true, force: true });
 
-    } else if (safeProvider === "modrinth") {
+    }
+    else if (safeProvider === "modrinth") {
       console.log(`[Provision] Starting Modrinth download for ${modpackId}...`);
       const packRes = await axios.get(`https://api.modrinth.com/v2/project/${modpackId}/version`);
       const latestVersion = packRes.data[0];
@@ -1292,7 +1321,7 @@ ipcMain.handle("provision-modpack", async (event, args: {
     await mapFoldersAndCollectFiles(tempServerPath, driveFolderId, accessToken, uploadJobs);
 
     console.log(`[Provision] Folder map complete. Unleashing swarm upload for ${uploadJobs.length} files...`);
-    await uploadSwarm(uploadJobs, 15, accessToken);
+    await uploadSwarm(uploadJobs, 25, accessToken);
 
     // ==========================================
     // PHASE 3: CLEANUP
@@ -1852,6 +1881,12 @@ async function fileExists(targetPath: string): Promise<boolean> {
   }
 }
 
+async function fetchCurseForge(endpoint: string, params: any = {}) {
+  const proxyUrl = "https://europe-west1-mc-server-manager-6d2bc.cloudfunctions.net/curseforgeProxy";
+  const res = await axios.post(proxyUrl, { endpoint, params });
+  return res.data;
+}
+
 
 // finding neccessry files for server start
 async function detectForgeLaunch(extractPath: string): Promise<ForgeLaunchInfo | null> {
@@ -1951,12 +1986,17 @@ async function runForgeInstaller(
     let stderr = "";
     let stdout = "";
 
+    // Look for this part inside runForgeInstaller:
     proc.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
+      // ✅ ADD THIS LINE: Print live progress to the terminal
+      process.stdout.write(chunk.toString());
     });
 
     proc.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
+      // ✅ ADD THIS LINE: Print live errors to the terminal
+      process.stderr.write(chunk.toString());
     });
 
     proc.on("error", reject);
@@ -2185,6 +2225,8 @@ ipcMain.handle("import-existing-world", async (_event, args) => {
       extractPath,
       retention = 10,
       port = 25565,
+      isModpack,
+      driveFolderId,
     } = args ?? {};
 
     if (!accessToken) {
@@ -2277,6 +2319,8 @@ ipcMain.handle("import-existing-world", async (_event, args) => {
       accessToken,
       serverId,
       loader,
+      isModpack,
+      driveFolderId,
     });
 
     const drive = createDriveClient(accessToken);
@@ -2325,6 +2369,8 @@ ipcMain.handle("import-existing-server", async (_event, args) => {
       serverSettingsOverride,
       retention = 10,
       port = 25565,
+      isModpack,
+      driveFolderId,
     } = args ?? {};
 
     if (!accessToken) {
@@ -2409,12 +2455,12 @@ ipcMain.handle("import-existing-server", async (_event, args) => {
       }
     }
 
-    if (!chosenWorldPath) {
-      throw new Error("Could not find a valid world folder inside the selected server.");
+    if (chosenWorldPath) {
+      await ensureEmptyDir(path.join(extractPath, "world"));
+      await copyDirectoryRecursive(chosenWorldPath, path.join(extractPath, "world"));
+    } else {
+      console.log("[Import] No pre-existing world folder found. A new world will generate on first boot.");
     }
-
-    await ensureEmptyDir(path.join(extractPath, "world"));
-    await copyDirectoryRecursive(chosenWorldPath, path.join(extractPath, "world"));
 
     const netherCandidates = [
       path.join(sourceServerPath, `${sourceLevelName}_nether`),
@@ -2503,52 +2549,12 @@ ipcMain.handle("import-existing-server", async (_event, args) => {
       accessToken,
       serverId,
       loader,
+      isModpack,
+      driveFolderId,
     });
 
     const drive = createDriveClient(accessToken);
 
-    const modsFolderId = await getOrCreateChildFolderId(drive, serverRootId, "mods");
-    const configFolderId = await getOrCreateChildFolderId(drive, serverRootId, "config");
-    const pluginsFolderId = await getOrCreateChildFolderId(drive, serverRootId, "plugins");
-
-    const copiedMods = await copyOptionalFolderIfExists(
-      path.join(sourceServerPath, "mods"),
-      path.join(extractPath, "mods")
-    );
-
-    const copiedConfig = await copyOptionalFolderIfExists(
-      path.join(sourceServerPath, "config"),
-      path.join(extractPath, "config")
-    );
-
-    const copiedPlugins = await copyOptionalFolderIfExists(
-      path.join(sourceServerPath, "plugins"),
-      path.join(extractPath, "plugins")
-    );
-
-    if (copiedMods) {
-      await uploadLocalFolderToDriveRecursive({
-        drive,
-        parentFolderId: modsFolderId,
-        localSourcePath: path.join(extractPath, "mods"),
-      });
-    }
-
-    if (copiedConfig) {
-      await uploadLocalFolderToDriveRecursive({
-        drive,
-        parentFolderId: configFolderId,
-        localSourcePath: path.join(extractPath, "config"),
-      });
-    }
-
-    if (copiedPlugins) {
-      await uploadLocalFolderToDriveRecursive({
-        drive,
-        parentFolderId: pluginsFolderId,
-        localSourcePath: path.join(extractPath, "plugins"),
-      });
-    }
 
     await backupServerV2({
       serverPath: extractPath,
@@ -2557,6 +2563,47 @@ ipcMain.handle("import-existing-server", async (_event, args) => {
       driveBackupFolderId: serverRootId,
       retention,
     });
+
+    // Modpack és Vanilla/Modded szinkronizálandó mappák teljes listája
+    const FOLDERS_TO_SYNC = [
+      "mods",
+      "config",
+      "plugins",
+      "kubejs",
+      "scripts",
+      "defaultconfigs",
+      "patchouli_books",
+      "global_packs",
+      "openloader",
+      "structures",
+      "skyblockbuilder",
+      "packmenu",
+      "modernfix",
+      "local",
+      "fancymenu_data",
+      "resourcepacks",
+      "shaderpacks"
+    ];
+
+    for (const folderName of FOLDERS_TO_SYNC) {
+      const sourceFolder = path.join(sourceServerPath, folderName);
+      const destFolder = path.join(extractPath, folderName);
+
+      // 1. Átmásoljuk a helyi mappába, ha létezik az eredetiben
+      const copied = await copyOptionalFolderIfExists(sourceFolder, destFolder);
+
+      if (copied) {
+        // 2. Ha átmásoltuk, létrehozzuk a mappát a Drive-on is
+        const driveFolderId = await getOrCreateChildFolderId(drive, serverRootId, folderName);
+        
+        // 3. Feltöltjük a fájlokat a Drive mappába (így azonnal látszik a Mod Managerben is!)
+        await uploadLocalFolderToDriveRecursive({
+          drive,
+          parentFolderId: driveFolderId,
+          localSourcePath: destFolder,
+        });
+      }
+    }
 
     return {
       success: true,
@@ -3866,7 +3913,7 @@ ipcMain.handle("ensure-drive-folder-path", async (_e, args) => {
 
   const drive = createDriveClient(args.accessToken);
 
-  const folders = ["backups", "mods", "config", "plugins"];
+  const folders = ["backups", "mods", "config", "plugins", "kubejs", "scripts", "defaultconfigs"];
 
   for (const name of folders) {
     const existing = await drive.files.list({

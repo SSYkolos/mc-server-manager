@@ -96,10 +96,13 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
     });
   };
 
-  const importSupported = useMemo(
-    () => settings.loader === "vanilla" || settings.loader === "fabric",
-    [settings.loader]
-  );
+const importSupported = useMemo(
+  () =>
+    settings.loader === "vanilla" ||
+    settings.loader === "fabric" ||
+    settings.loader === "forge",
+  [settings.loader]
+);
 
   const resetImportState = () => {
     setSelectedWorldPath("");
@@ -209,7 +212,7 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
     }
   };
 
-  useEffect(() => {
+useEffect(() => {
     let cancelled = false;
 
     async function loadForgeVersions() {
@@ -221,15 +224,22 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
 
       const mcVersion = settings.mcVersion.trim();
 
-      if (!mcVersion) {
+      // FIX 1: Validate that the string is a complete version (e.g., 1.20 or 1.20.4)
+      if (!mcVersion || !/^1\.\d+(\.\d+)?$/.test(mcVersion)) {
         setForgeVersions([]);
         setLoadingForgeVersions(false);
         setSettings((prev) => ({ ...prev, loaderVersion: "" }));
+        
+        // Clear the UI error while the user is still typing an incomplete version
+        setError((prev) => prev.includes("Failed to fetch Forge versions") ? "" : prev);
         return;
       }
 
       try {
         setLoadingForgeVersions(true);
+        
+        // Clear any lingering Forge error before we make a valid request
+        setError((prev) => prev.includes("Failed to fetch Forge versions") ? "" : prev);
 
         const res = await window.electronAPI.getForgeLoaderVersions(mcVersion);
 
@@ -268,10 +278,14 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
       }
     }
 
-    loadForgeVersions();
+    // FIX 2: Debounce the request by 500ms so it waits for the user to stop typing
+    const timeoutId = setTimeout(() => {
+      loadForgeVersions();
+    }, 500);
 
     return () => {
       cancelled = true;
+      clearTimeout(timeoutId); // Cancel the timeout if the user types another character quickly
     };
   }, [settings.loader, settings.mcVersion]);
 
@@ -342,6 +356,11 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
 
         if (settings.loader === "fabric" && !settings.loaderVersion?.trim()) {
           setError("Fabric loader version is required for Fabric import.");
+          return;
+        }
+
+        if (settings.loader === "forge" && !settings.loaderVersion?.trim()) {
+          setError("Forge loader version is required for Forge import.");
           return;
         }
 
@@ -465,6 +484,8 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
             accessToken,
             serverId: newServerRef.id,
             loader: settings.loader,
+            isModpack: settings.isModpack,
+            driveFolderId: driveFolderId,
             mcVersion: settings.mcVersion?.trim() || "1.20.4",
             loaderVersion: settings.loaderVersion?.trim() || "",
             sourceWorldPath: selectedWorldPath,
@@ -489,6 +510,8 @@ export default function CreateServerForm({ onCreated }: { onCreated?: () => void
           accessToken,
           serverId: newServerRef.id,
           loader: settings.loader,
+          isModpack: settings.isModpack,
+          driveFolderId: driveFolderId,
           mcVersion: settings.mcVersion?.trim() || "1.20.4",
           loaderVersion: settings.loaderVersion?.trim() || "",
           sourceServerPath: selectedServerPath,

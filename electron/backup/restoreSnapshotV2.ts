@@ -552,16 +552,24 @@ function shouldVerifyInBackground(filePath: string) {
     return false;
   }
 
+  // Modpack és szerver fájlok engedélyezése a verifikációhoz
   if (
     normalized.startsWith("mods/") ||
     normalized.startsWith("config/") ||
     normalized.startsWith("plugins/") ||
-    normalized.startsWith("libraries/")
+    normalized.startsWith("libraries/") ||
+    normalized.startsWith("kubejs/") ||
+    normalized.startsWith("scripts/") ||
+    normalized.startsWith("defaultconfigs/") ||
+    normalized.startsWith("patchouli_books/") ||
+    normalized.startsWith("global_packs/") ||
+    normalized.startsWith("openloader/") ||
+    normalized.startsWith("structures/")
   ) {
     return true;
   }
 
-  return /\.(jar|json|toml|ya?ml|properties|txt|png)$/i.test(normalized);
+  return /\.(jar|json|toml|ya?ml|properties|txt|png|js|zs)$/i.test(normalized);
 }
 
 export async function verifySnapshotRestoreV2({

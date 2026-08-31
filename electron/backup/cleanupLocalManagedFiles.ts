@@ -10,7 +10,20 @@ const MANAGED_ROOTS = [
   "banned-ips.json",
   "banned-players.json",
   "usercache.json",
-  "eula.txt"
+  "eula.txt",
+  "server.properties",
+  "server-icon.png",
+  "mods",
+  "config",
+  "plugins",
+  "libraries",
+  "kubejs",
+  "scripts",
+  "defaultconfigs",
+  "patchouli_books",
+  "global_packs",
+  "openloader",
+  "structures"
 ]
 
 function normalizeRel(rel: string) {

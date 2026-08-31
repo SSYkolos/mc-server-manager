@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     serverSettingsOverride?: Record<string, any>;
     retention?: number;
     port?: number;
+    isModpack?: boolean;
+    driveFolderId?: string;
   }) => ipcRenderer.invoke("import-existing-server", args),
 
   searchMods: (args: {
@@ -147,6 +149,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     extractPath: string;
     retention?: number;
     port?: number;
+    isModpack?: boolean;
+    driveFolderId?: string;
   }) => ipcRenderer.invoke("import-existing-world", args),
 
   deleteDriveFile: (args: {
@@ -191,7 +195,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   downloadDriveFolder: (args: {
     accessToken: string;
     serverRootFolderId: string;
-    folderName: "mods" | "config" | "plugins";
+    folderName: "mods" | "config" | "plugins" | "kubejs" | "scripts" | "defaultconfigs";
     localDestination: string;
   }) => ipcRenderer.invoke("download-drive-folder", args),
   getServerLogs: (params: { serverId: string; limit?: number }) =>
